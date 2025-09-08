@@ -1,0 +1,8 @@
+{
+  "app": "vira-vpn",
+  "port": 80,
+  "build": {
+    "location": "iran"
+  },
+  "disks": []
+}
