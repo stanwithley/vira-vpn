@@ -4,24 +4,26 @@ from aiogram.types import Message
 from aiogram.filters import CommandStart
 
 from db.mongo_crud import get_or_create_user
+from keyboards.main_menu import main_menu   # ← همین کیبوردی که داری
 
 router = Router()
 
 @router.message(CommandStart())
 async def start_cmd(m: Message):
-    # اگر deep-link داشت، اینجا به‌درد می‌خوره
+    # اگر deep-link داشت (مثل /start promo123)
     args = m.text.split(maxsplit=1)[1] if (m.text and " " in m.text) else None
 
-    # ساخت/آپدیت کاربر
+    # ساخت/آپدیت کاربر در دیتابیس
     await get_or_create_user(
         tg_id=m.from_user.id,
         username=m.from_user.username,
         first_name=m.from_user.first_name
     )
 
-    # پاسخ خوش‌آمد
+    # متن خوش‌آمد
+    text = "سلام 👋\nبه بات خوش اومدی!"
     if args:
-        await m.answer(f"سلام 👋\nکدت رو گرفتم: <code>{args}</code>", parse_mode="HTML")
-        # اینجا می‌تونی براساس args کاری کنی (ارجاع، کمپین، پلن تریال، ...)
-    else:
-        await m.answer("سلام 👋\nبه بات خوش اومدی!")
+        text += f"\nکدت رو گرفتم: <code>{args}</code>"
+
+    # ارسال پیام + کیبورد اصلی
+    await m.answer(text, parse_mode="HTML", reply_markup=main_menu())
