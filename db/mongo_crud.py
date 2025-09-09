@@ -1,19 +1,25 @@
 # db/mongo_crud.py
 from datetime import datetime, timedelta
-from bson import ObjectId
+from bson import ObjectId, Int64
 from db.mongo import users_col, plans_col, orders_col, subscriptions_col, admins_col
 
 # ---- Users
 async def get_or_create_user(tg_id: int, username: str | None, first_name: str | None):
     u = await users_col.find_one({"tg_id": tg_id})
     if u:
+        # نرمال‌سازی tg_id به Int64 همزمان با آپدیت
         await users_col.update_one(
             {"_id": u["_id"]},
-            {"$set": {"username": username, "first_name": first_name}}
+            {"$set": {
+                "tg_id": Int64(tg_id),
+                "username": username,
+                "first_name": first_name,
+            }}
         )
         return u
+
     doc = {
-        "tg_id": tg_id,
+        "tg_id": Int64(tg_id),            # ← خیلی مهم
         "username": username,
         "first_name": first_name,
         "created_at": datetime.utcnow(),

@@ -13,6 +13,7 @@ from handlers import start, trial, buy, renew, wallet, mysubs, help as help_h, s
 
 async def main():
     bot = Bot(token=settings.BOT_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
+    await bot.delete_webhook(drop_pending_updates=False)
     await ensure_collections_and_validators()
     dp = Dispatcher()
 
