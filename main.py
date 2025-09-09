@@ -3,7 +3,7 @@ import asyncio
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
-
+from handlers import admin_manage
 from config import settings
 from db.mongo import ensure_indexes
 from db.mongo_crud import ensure_default_plans
@@ -25,6 +25,8 @@ async def main():
     dp.include_router(mysubs.router)
     dp.include_router(help_h.router)
     dp.include_router(support.router)
+    dp.include_router(admin_manage.router)
+
 
     # DB bootstrapping
     await ensure_indexes()

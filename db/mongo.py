@@ -1,15 +1,17 @@
 # db/mongo.py
 import motor.motor_asyncio
-from datetime import datetime
+
 from config import settings
 
 client = motor.motor_asyncio.AsyncIOMotorClient(settings.MONGO_URI)
 db = client[settings.MONGO_DB]
 
-users_col         = db["users"]
-plans_col         = db["plans"]
-orders_col        = db["orders"]
+users_col = db["users"]
+plans_col = db["plans"]
+orders_col = db["orders"]
 subscriptions_col = db["subscriptions"]
+admins_col = db["admins"]
+
 
 async def ensure_indexes():
     # کاربران

@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     MONGO_URI: str
     MONGO_DB: str = "vira-vpn"
     SUPPORT_USERNAME: str = "vira_support"
+    admin_ids: list[int] = [149609494]
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
