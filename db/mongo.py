@@ -11,7 +11,7 @@ plans_col = db["plans"]
 orders_col = db["orders"]
 subscriptions_col = db["subscriptions"]
 admins_col = db["admins"]
-
+payments_col = db["payments"]
 
 async def ensure_indexes():
     # کاربران
@@ -28,3 +28,7 @@ async def ensure_indexes():
     # اشتراک‌ها
     await subscriptions_col.create_index([("user_id", 1), ("status", 1)])
     await subscriptions_col.create_index("end_at")
+
+    await payments_col.create_index([("order_id", 1), ("created_at", -1)])
+    await payments_col.create_index("status")
+    await admins_col.create_index("uid", unique=True)
