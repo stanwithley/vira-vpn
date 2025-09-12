@@ -331,21 +331,27 @@ async def on_approve_payment(cq: types.CallbackQuery):
 
     payment_id = cq.data.split(":", 1)[1]
     ok = await approve_c2c_payment_and_mark_order_paid(payment_id, reviewer_uid=cq.from_user.id)
-    if not ok:
-        # --- Provision: صدور سرویس بعد از تایید پرداخت ---
-        try:
-            from services.provision import provision_paid_order
-            payment = await get_payment_by_id(payment_id)  # این تابع را از db.mongo_crud قبلاً ایمپورت داری
-            if payment:
-                await provision_paid_order(payment["order_id"], cq.bot)
-        except Exception as e:
-            # اگر خطایی رخ داد، به ادمین خبر بده ولی جریان اصلی قطع نشه
-            try:
-                await cq.message.answer(rtl(f"⚠️ خطا در صدور سرویس: {e}"))
-            except Exception:
-                pass
 
+    if not ok:
+        # تایید انجام نشد یا قبلاً رسیدگی شده
         return await cq.answer("پرداخت یافت نشد یا قبلاً رسیدگی شده.", show_alert=True)
+
+    # --- Provision: بعد از تایید موفق پرداخت ---
+    try:
+        from services.provision import provision_paid_order
+        from db.mongo_crud import get_payment_by_id  # اگر بالاتر ایمپورت نیست
+
+        payment = await get_payment_by_id(payment_id)
+        if payment:
+            await provision_paid_order(payment["order_id"], cq.bot)
+        else:
+            await cq.message.answer(rtl("⚠️ پرداخت برای صدور سرویس پیدا نشد."))
+    except Exception as e:
+        # اگر خطا خورد، به ادمین اطلاع بده اما جریان اصلی ادامه داشته باشد
+        try:
+            await cq.message.answer(rtl(f"⚠️ خطا در صدور سرویس: {e}"))
+        except Exception:
+            pass
 
     await safe_edit(cq.message, caption=rtl("✅ پرداخت تایید شد و سفارش فعال گردید."))
     await cq.answer("پرداخت تایید شد.")
