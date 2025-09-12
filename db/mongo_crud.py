@@ -82,15 +82,16 @@ async def mark_order_paid(order_id: ObjectId, provider: str, provider_ref: str):
 
 # ---- Subscriptions
 async def create_subscription_from_plan(user_id: ObjectId, order_id: ObjectId, plan: dict, config_ref: str | None = None):
+    now = datetime.utcnow()
     doc = {
         "user_id": user_id,
         "order_id": order_id,
         "source_plan": plan["code"],
-        "gb_total": plan["gb"],
-        "gb_used": 0,
+        "quota_mb": int(plan["gb"]) * 1024,   # به MB
+        "used_mb": 0,
         "devices": plan["devices"],
-        "start_at": datetime.utcnow(),
-        "end_at": datetime.utcnow() + timedelta(days=plan["days"]),
+        "start_at": now,
+        "end_at": now + timedelta(days=plan["days"]),
         "status": "active",
         "config_ref": config_ref,
     }
