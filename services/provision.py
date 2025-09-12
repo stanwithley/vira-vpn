@@ -6,7 +6,7 @@ from bson import ObjectId
 
 from db.mongo import subscriptions_col, plans_col, orders_col, users_col
 from services.xray_service import add_client
-
+import asyncio
 
 async def provision_paid_order(order_id: ObjectId, bot: Bot) -> bool:
     order = await orders_col.find_one({"_id": ObjectId(str(order_id))})
@@ -41,6 +41,7 @@ async def provision_paid_order(order_id: ObjectId, bot: Bot) -> bool:
         "config_ref": vless_link,  # همینجا لینک را ذخیره می‌کنیم
         "xray": {"email": email, "uuid": uuid_str},
     }
+    uuid_str, vless_link = await asyncio.to_thread(add_client, email)
     await subscriptions_col.insert_one(sub_doc)
 
     # پیام به کاربر
