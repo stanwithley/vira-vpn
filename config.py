@@ -15,6 +15,19 @@ class Settings(BaseSettings):
     # چند ادمین (لیست عددی chat_id)
     ADMIN_CHAT_IDS: list[int] = [149609494]
 
+    XRAY_CONFIG_PATH: str = "/usr/local/etc/xray/config.json"
+    XRAY_SERVICE_NAME: str = "xray"
+    XRAY_DOMAIN: str = "127.0.0.1"
+    XRAY_WS_PATH: str = "/ws8081"
+    XRAY_PORT: int = 8081
+    XRAY_SECURITY: str = "none"
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore"  # می‌تونی حتی نگهش داری
+    )
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 settings = Settings()
