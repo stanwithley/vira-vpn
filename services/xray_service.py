@@ -8,6 +8,7 @@ import tempfile
 import uuid
 from typing import Tuple, Optional
 
+# ===== تنظیمات از محیط =====
 XRAY_CONFIG_PATH = os.getenv("XRAY_CONFIG_PATH", "/usr/local/etc/xray/config.json")
 XRAY_SERVICE_NAME = os.getenv("XRAY_SERVICE_NAME", "xray")
 XRAY_DOMAIN = os.getenv("XRAY_DOMAIN", "127.0.0.1")
@@ -24,11 +25,10 @@ def _assert_paths():
         raise FileNotFoundError(f"XRAY_CONFIG_PATH not found: {XRAY_CONFIG_PATH}")
     if not os.access(XRAY_CONFIG_PATH, os.R_OK):
         raise PermissionError(f"No read permission for {XRAY_CONFIG_PATH}")
-    # we will write atomically using os.replace; check dir permission
+    # برای نوشتن اتمیک، باید پوشه قابل‌نوشتن باشد (معمولاً توسط root یا با مجوز مناسب)
     cfg_dir = os.path.dirname(XRAY_CONFIG_PATH) or "."
     if not os.access(cfg_dir, os.W_OK):
-        # write might still work via sudo tee if you choose that route,
-        # but for direct write we need dir permission
+        # ممکن است با sudo tee هم کار کند، ولی برای این کد بهتر است پوشه writable باشد
         pass
 
 
@@ -62,6 +62,7 @@ def _save_config(cfg: dict):
                 pass
 
 
+# ---------- systemd helpers ----------
 def _restart_xray():
     """Restart Xray via systemd. Requires sudoers rule if non-root."""
     try:
@@ -74,6 +75,35 @@ def _restart_xray():
     except subprocess.CalledProcessError as e:
         msg = e.stderr.strip() or e.stdout.strip() or str(e)
         raise RuntimeError(f"Failed to restart {XRAY_SERVICE_NAME}: {msg}")
+
+
+def _reload_xray():
+    """
+    تأکید بر reload (HUP) برای جلوگیری از قطع سشن‌ها.
+    اگر reload موجود نبود یا خطا داد، به restart برمی‌گردد.
+    """
+    try:
+        subprocess.run(
+            ["sudo", "systemctl", "reload", XRAY_SERVICE_NAME],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        # Fallback to restart
+        try:
+            subprocess.run(
+                ["sudo", "systemctl", "restart", XRAY_SERVICE_NAME],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as e2:
+            msg1 = e.stderr.strip() or e.stdout.strip() or str(e)
+            msg2 = e2.stderr.strip() or e2.stdout.strip() or str(e2)
+            raise RuntimeError(
+                f"Failed to reload {XRAY_SERVICE_NAME}: {msg1}; restart fallback failed: {msg2}"
+            )
 
 
 # ---------- Inbound helpers ----------
@@ -128,28 +158,30 @@ def _build_vless_ws_link(uuid_str: str, email: str) -> str:
 def add_client(email: str) -> Tuple[str, str]:
     """
     Add (or reuse) a client to VLESS/WS inbound and return (uuid, vless_link).
-    Idempotent per email: if email exists, returns existing client's link.
+    Idempotent per email: if email exists, returns existing client's link (no reload).
     """
     cfg = _load_config()
     _ensure_vless_ws_inbound(cfg)
 
-    uid = str(uuid.uuid4())
     ib = _find_vless_ws_inbound(cfg)
     if not ib:
         raise RuntimeError("VLESS/WS inbound not found or failed to create.")
 
     clients = ib.setdefault("settings", {}).setdefault("clients", [])
 
-    # reuse existing by email
+    # reuse existing by email → تغییری در config نمی‌دهیم، پس reload/restart لازم نیست
     for c in clients:
         if c.get("email") == email:
             link = _build_vless_ws_link(c["id"], email)
             return c["id"], link
 
+    # otherwise add new client
+    uid = str(uuid.uuid4())
     clients.append({"id": uid, "email": email})
 
     _save_config(cfg)
-    _restart_xray()
+    # تغییر واقعی رخ داده → اول reload، اگر نشد fallback به restart
+    _reload_xray()
     return uid, _build_vless_ws_link(uid, email)
 
 
@@ -169,5 +201,5 @@ def remove_client(email: str) -> bool:
 
     if changed:
         _save_config(cfg)
-        _restart_xray()
+        _reload_xray()
     return changed
