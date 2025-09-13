@@ -17,7 +17,7 @@ class Settings(BaseSettings):
 
     XRAY_CONFIG_PATH: str = "/usr/local/etc/xray/config.json"
     XRAY_SERVICE_NAME: str = "xray"
-    XRAY_DOMAIN: str = "193.180.211.230"
+    XRAY_DOMAIN: str = "127.0.0.1"
     XRAY_WS_PATH: str = "/ws8081"
     XRAY_PORT: int = 8081
     XRAY_SECURITY: str = "none"
