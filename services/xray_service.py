@@ -24,6 +24,61 @@ XRAY_API_ADDR  = os.getenv("XRAY_API_ADDR", "127.0.0.1:10085")
 INBOUND_TAG    = os.getenv("XRAY_INBOUND_TAG", "vless-ws")  # باید در config به inbound 8081 داده شده باشد (tag)
 
 # ---------- File IO helpers ----------
+def _test_config(path: str) -> None:
+    """xray -test -config <path>؛ خطا بده اگر نامعتبر بود."""
+    p = subprocess.run(
+        [XRAY_BIN, "-test", "-config", path],
+        capture_output=True, text=True
+    )
+    if p.returncode != 0:
+        msg = (p.stderr or p.stdout or "").strip()
+        raise RuntimeError(f"xray -test failed: {msg}")
+
+def _apply_config_safely(new_cfg: dict) -> None:
+    """
+    کانفیگ جدید را در فایل موقت می‌نویسد، تست می‌کند،
+    اگر OK بود اتمیک جایگزین می‌کند و سپس reload می‌زند.
+    اگر هر مرحله‌ای خطا داشت، کانفیگ قبلی برمی‌گردد.
+    """
+    cfg_dir = os.path.dirname(XRAY_CONFIG_PATH) or "."
+    backup = XRAY_CONFIG_PATH + ".bak"
+
+    # 1) نوشتن موقت
+    fd, tmp = tempfile.mkstemp(dir=cfg_dir, prefix=".xraycfg_", suffix=".json")
+    os.close(fd)
+    try:
+        with open(tmp, "w") as f:
+            json.dump(new_cfg, f, ensure_ascii=False, indent=2)
+
+        # 2) تست
+        _test_config(tmp)
+
+        # 3) بکاپ و جایگزینی اتمیک
+        if os.path.exists(XRAY_CONFIG_PATH):
+            try:
+                shutil.copy2(XRAY_CONFIG_PATH, backup)
+            except Exception:
+                pass
+        os.replace(tmp, XRAY_CONFIG_PATH)
+
+        # 4) ری‌لود (HUP)؛ اگر نشد، ری‌استارت
+        try:
+            subprocess.run(["sudo", "systemctl", "reload", XRAY_SERVICE_NAME],
+                           check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError:
+            subprocess.run(["sudo", "systemctl", "restart", XRAY_SERVICE_NAME],
+                           check=True, capture_output=True, text=True)
+
+    except Exception as e:
+        # اگر هرکدام شکست خورد و فایل موقت هست پاک کن
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        finally:
+            raise
+
+
+
 def _assert_paths():
     if not os.path.exists(XRAY_CONFIG_PATH):
         raise FileNotFoundError(f"XRAY_CONFIG_PATH not found: {XRAY_CONFIG_PATH}")
@@ -167,35 +222,28 @@ def _remove_user_runtime(email: str) -> bool:
 
 # ---------- Public API ----------
 def add_client(email: str) -> Tuple[str, str]:
-    """
-    افزون/بازیابی کاربر:
-    1) تلاش با Runtime API (بدون دست‌زدن به فایل و بدون ری‌استارت)
-    2) اگر در دسترس نبود → fallback به فایل + reload/restart
-    """
-    # Try runtime API first (zero-downtime)
-    try:
-        link = _add_user_runtime(email)
-        uid = link.split("://", 1)[1].split("@", 1)[0]
-        return uid, link
-    except Exception:
-        pass  # fallback
-
-    # Fallback: edit file + reload
     cfg = _load_config()
     _ensure_vless_ws_inbound(cfg)
+
     ib = _find_vless_ws_inbound(cfg)
     if not ib:
         raise RuntimeError("VLESS/WS inbound not found or failed to create.")
 
     clients = ib.setdefault("settings", {}).setdefault("clients", [])
+
+    # اگر ایمیل وجود دارد، کانفیگ را دست نمی‌زنیم (بدون ری‌لود)
     for c in clients:
         if c.get("email") == email:
-            return c["id"], _build_vless_ws_link(c["id"], email)
+            link = _build_vless_ws_link(c["id"], email)
+            return c["id"], link
 
+    # افزودن کلاینت جدید
     uid = str(uuid.uuid4())
     clients.append({"id": uid, "email": email})
-    _save_config(cfg)
-    _reload_xray()
+
+    # به‌صورت امن اعمال کن (تست + رول‌بک)
+    _apply_config_safely(cfg)
+
     return uid, _build_vless_ws_link(uid, email)
 
 def remove_client(email: str) -> bool:
