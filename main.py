@@ -11,6 +11,7 @@ from db.schema import ensure_collections_and_validators
 from handlers import start, trial, buy, renew, wallet, mysubs, help as help_h, support
 from handlers import debug
 from services.enforcer import expire_loop
+from services.quota_enforcer import quota_loop
 
 
 async def main():
@@ -32,6 +33,7 @@ async def main():
     dp.include_router(debug.router)
 
     asyncio.create_task(expire_loop())
+    asyncio.create_task(quota_loop(bot))
 
     # DB bootstrapping
     await ensure_indexes()

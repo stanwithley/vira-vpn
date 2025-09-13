@@ -203,3 +203,34 @@ def remove_client(email: str) -> bool:
         _save_config(cfg)
         _reload_xray()
     return changed
+
+
+# --- زیر سایر توابع services/xray_service.py اضافه کن ---
+
+XRAY_BIN = os.getenv("XRAY_BIN", "/usr/local/bin/xray")
+XRAY_API_ADDR = os.getenv("XRAY_API_ADDR", "127.0.0.1:10085")
+
+def _xray_api_stats_query(name: str) -> int:
+    """
+    xray api stats query --server=127.0.0.1:10085 --name 'user>>>EMAIL>>>traffic>>>uplink'
+    خروجی معمولاً یک عدد صحیح (bytes) است. اگر نشد، صفر برمی‌گردانیم.
+    """
+    try:
+        cmd = [XRAY_BIN, "api", "stats", "query", f"--server={XRAY_API_ADDR}", "--name", name]
+        p = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        out = (p.stdout or "").strip()
+        # بعضی بیلدها "value: N" می‌دهند
+        if out.startswith("value:"):
+            out = out.split(":", 1)[1].strip()
+        return int(out or "0")
+    except Exception:
+        return 0
+
+def get_user_traffic_bytes(email: str) -> tuple[int, int, int]:
+    """
+    بایت‌های (uplink, downlink, total) برای یک ایمیل کاربر.
+    """
+    up = _xray_api_stats_query(f"user>>>{email}>>>traffic>>>uplink")
+    dn = _xray_api_stats_query(f"user>>>{email}>>>traffic>>>downlink")
+    total = up + dn
+    return up, dn, total
