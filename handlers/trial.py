@@ -8,8 +8,6 @@ from db.mongo import subscriptions_col
 from services.xray_service import add_client
 from services.qrcode_gen import make_qr_png_bytes
 
-# اگر utilهای قالب‌بندی فارسی داری از همان‌ها استفاده کن؛
-# اینجا یک RTL ساده می‌گذارم تا وابستگی نشود.
 def rtl(s: str) -> str: return "\u200F" + s
 def fa_num(s: str) -> str:
     tbl = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
@@ -17,24 +15,70 @@ def fa_num(s: str) -> str:
 
 router = Router()
 
+# تعداد دستگاه واقعاً enforce می‌شود (برای هر device یک UUID/لینک جدا)
 TRIAL_CONF = {
-    "quota_mb": 300,   # ۳۰۰ مگابایت
-    "hours": 24,       # ۲۴ ساعت
-    "devices": 1,
+    "quota_mb": 300,   # مگابایت
+    "hours": 24,       # ساعت
+    "devices": 1,      # اگر 2 یا بیشتر بگذاری، به همان تعداد لینک/QR می‌سازیم
 }
 
-def _fmt_trial_msg(vless_uri: str, end_at: datetime) -> str:
-    return rtl(
+def _fmt_trial_msg(links: list[str], end_at: datetime) -> str:
+    header = rtl(
         "✅ اکانت تست فعال شد.\n\n"
         f"• حجم: {fa_num(TRIAL_CONF['quota_mb'])} مگ\n"
         f"• مدت: {fa_num(TRIAL_CONF['hours'])} ساعت\n"
         f"• دستگاه: {fa_num(TRIAL_CONF['devices'])}\n"
         f"• پایان: {end_at:%Y-%m-%d %H:%M UTC}\n"
         "—\n"
-        "🔗 لینک اتصال (کپی کن داخل v2rayN/v2rayNG/Nekoray وارد کن):\n"
-        f"<code>{vless_uri}</code>\n\n"
-        "یا QR را اسکن کن."
+        "🔗 لینک‌های اتصال:"
     )
+    lines = [header]
+    for i, link in enumerate(links, 1):
+        lines.append(f"{i}) <code>{link}</code>")
+    lines.append(rtl("\nهر دستگاه از یکی از لینک‌ها استفاده کند."))
+    return "\n".join(lines)
+
+async def _ensure_trial_links(user_id: int, sub_id, dev_count: int) -> tuple[list[str], list[dict]]:
+    """
+    مطمئن می‌شود برای اشتراک تِست، به تعداد devices لینک/UUID وجود دارد.
+    اگر نبود، می‌سازد و در DB ذخیره می‌کند.
+    خروجی: (links, xray_accounts)
+    """
+    doc = await subscriptions_col.find_one({"_id": sub_id})
+    links = doc.get("config_ref")
+    xinfo = doc.get("xray")
+
+    # نرمالایز به ساختار جدید: links = list[str] و xray = list[{"email","uuid"}]
+    if isinstance(links, str):
+        links = [links]
+    elif not isinstance(links, list):
+        links = []
+
+    accounts: list[dict] = []
+    if isinstance(xinfo, dict) and ("email" in xinfo or "uuid" in xinfo):
+        accounts = [xinfo]
+    elif isinstance(xinfo, list):
+        accounts = xinfo
+    else:
+        accounts = []
+
+    # اضافه کردن تا رسیدن به dev_count
+    made_new = False
+    i = 0
+    while len(links) < dev_count:
+        i = len(links) + 1
+        email = f"trial-{user_id}-{i}@bot"
+        uuid_str, vless_link = add_client(email)
+        links.append(vless_link)
+        accounts.append({"email": email, "uuid": uuid_str})
+        made_new = True
+
+    if made_new:
+        await subscriptions_col.update_one(
+            {"_id": sub_id},
+            {"$set": {"config_ref": links, "xray": accounts}}
+        )
+    return links, accounts
 
 @router.message(F.text == "🧪 اکانت تست")
 async def trial_handler(m: types.Message):
@@ -45,8 +89,9 @@ async def trial_handler(m: types.Message):
     )
 
     now = datetime.utcnow()
+    dev_count = int(TRIAL_CONF["devices"])
 
-    # اگر قبلاً تِست فعال دارد و تمام نشده، همان را نمایش بده
+    # اگر قبلاً تست فعال دارد و تمام نشده، همان را نشان بده (و در صورت نیاز لینک‌ها را کامل کن)
     existed = await subscriptions_col.find_one({
         "user_id": user["_id"],
         "source_plan": "trial",
@@ -54,55 +99,58 @@ async def trial_handler(m: types.Message):
         "end_at": {"$gt": now},
     })
     if existed:
-        vless = existed.get("config_ref")
-        if not vless:
-            # اگر قدیمی بوده و لینک ذخیره نشده؛ از ایمیلِ ثبت‌شده re-generate کنیم
-            xinfo = existed.get("xray") or {}
-            email = xinfo.get("email") or f"trial-{m.from_user.id}@bot"
-            uuid_str = xinfo.get("uuid")
-            # اگر uuid نداریم، add_client ایمیل قبلی را reuse می‌کند یا جدید می‌سازد
-            uuid_str, vless = add_client(email)
-            await subscriptions_col.update_one(
-                {"_id": existed["_id"]},
-                {"$set": {"config_ref": vless, "xray.uuid": uuid_str, "xray.email": email}}
-            )
-        png = make_qr_png_bytes(vless)
-        await m.answer_photo(
-            photo=BufferedInputFile(png, filename="trial.png"),
-            caption=_fmt_trial_msg(vless, existed["end_at"]),
-            parse_mode="HTML"
-        )
+        links, _ = await _ensure_trial_links(m.from_user.id, existed["_id"], dev_count)
+
+        # ارسال QR چندتایی
+        media = []
+        for i, link in enumerate(links, 1):
+            png = make_qr_png_bytes(link)
+            media.append(types.InputMediaPhoto(
+                media=BufferedInputFile(png, filename=f"trial_{i}.png"),
+                caption=_fmt_trial_msg(links, existed["end_at"]) if i == 1 else None,
+                parse_mode="HTML"
+            ))
+        if media:
+            await m.answer_media_group(media)
+        else:
+            await m.answer(_fmt_trial_msg(links, existed["end_at"]), parse_mode="HTML")
         return
 
-    # در غیر این صورت، یک تست جدید ایجاد کن
+    # ساخت تِست جدید
     end_at = now + timedelta(hours=TRIAL_CONF["hours"])
+    links = []
+    accounts = []
+    for i in range(dev_count):
+        email = f"trial-{m.from_user.id}-{i+1}@bot"
+        uuid_str, vless_link = add_client(email)
+        links.append(vless_link)
+        accounts.append({"email": email, "uuid": uuid_str})
 
-    # ایمیل/برچسب یکتا برای Xray (قابل سرچ در لاگ‌ها)
-    email = f"trial-{m.from_user.id}@bot"
-
-    # روی Xray کاربر را اضافه کن و لینک VLESS بده
-    uuid_str, vless_link = add_client(email)
-
-    # اشتراک را در DB ذخیره کن
     sub_doc = {
         "user_id": user["_id"],
         "order_id": None,
         "source_plan": "trial",
-        "quota_mb": TRIAL_CONF["quota_mb"],  # MB
+        "quota_mb": TRIAL_CONF["quota_mb"],
         "used_mb": 0,
-        "devices": TRIAL_CONF["devices"],
+        "devices": dev_count,
         "start_at": now,
         "end_at": end_at,
         "status": "active",
-        "config_ref": vless_link,
-        "xray": {"email": email, "uuid": uuid_str},
+        "config_ref": links,   # لیست لینک‌ها
+        "xray": accounts,      # لیست ایمیل/UUID
     }
-    await subscriptions_col.insert_one(sub_doc)
+    res = await subscriptions_col.insert_one(sub_doc)
 
-    # QR بساز و ارسال کن
-    png = make_qr_png_bytes(vless_link)
-    await m.answer_photo(
-        photo=BufferedInputFile(png, filename="trial.png"),
-        caption=_fmt_trial_msg(vless_link, end_at),
-        parse_mode="HTML"
-    )
+    # QR چندتایی
+    media = []
+    for i, link in enumerate(links, 1):
+        png = make_qr_png_bytes(link)
+        media.append(types.InputMediaPhoto(
+            media=BufferedInputFile(png, filename=f"trial_{i}.png"),
+            caption=_fmt_trial_msg(links, end_at) if i == 1 else None,
+            parse_mode="HTML"
+        ))
+    if media:
+        await m.answer_media_group(media)
+    else:
+        await m.answer(_fmt_trial_msg(links, end_at), parse_mode="HTML")

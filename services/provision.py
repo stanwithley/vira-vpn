@@ -1,12 +1,10 @@
 # services/provision.py
 from datetime import datetime, timedelta
-
 from aiogram import Bot
 from bson import ObjectId
 
 from db.mongo import subscriptions_col, plans_col, orders_col, users_col
 from services.xray_service import add_client
-import asyncio
 
 async def provision_paid_order(order_id: ObjectId, bot: Bot) -> bool:
     order = await orders_col.find_one({"_id": ObjectId(str(order_id))})
@@ -21,11 +19,17 @@ async def provision_paid_order(order_id: ObjectId, bot: Bot) -> bool:
     if not plan:
         return False
 
-    # ایمیل/برچسب: یکتا بر اساس کاربر و سفارش
-    email = f"{str(user['_id'])[-6:]}-{str(order['_id'])[-6:]}@bot"
+    # تعداد دستگاه
+    dev_count = int(plan.get("devices", 1))
 
-    # ساخت کاربر روی Xray
-    uuid_str, vless_link = add_client(email)
+    # برای هر دستگاه یک ایمیل/UUID/لینک جدا
+    links = []
+    xray_accounts = []
+    for i in range(dev_count):
+        email = f"{str(user['_id'])[-6:]}-{str(order['_id'])[-6:]}-{i+1}@bot"
+        uuid_str, vless_link = add_client(email)
+        links.append(vless_link)
+        xray_accounts.append({"email": email, "uuid": uuid_str})
 
     now = datetime.utcnow()
     sub_doc = {
@@ -34,27 +38,30 @@ async def provision_paid_order(order_id: ObjectId, bot: Bot) -> bool:
         "source_plan": plan["code"],
         "quota_mb": int(plan["gb"]) * 1024,  # MB
         "used_mb": 0,
-        "devices": int(plan.get("devices", 1)),
+        "devices": dev_count,
         "start_at": now,
         "end_at": now + timedelta(days=int(plan["days"])),
         "status": "active",
-        "config_ref": vless_link,  # همینجا لینک را ذخیره می‌کنیم
-        "xray": {"email": email, "uuid": uuid_str},
+        "config_ref": links,      # ⬅️ لیست لینک‌ها
+        "xray": xray_accounts,    # ⬅️ لیست ایمیل/UUID
     }
-    uuid_str, vless_link = await asyncio.to_thread(add_client, email)
     await subscriptions_col.insert_one(sub_doc)
 
-    # پیام به کاربر
+    # پیام به کاربر (همه لینک‌ها)
     tg_id = user.get("tg_id")
     if tg_id is not None:
-        txt = (
-            "\u200F"
-            "🎉 اشتراک شما فعال شد.\n\n"
-            f"• پلن: {plan['title']}\n"
-            f"• حجم: {plan['gb']} گیگ / مدت: {plan['days']} روز / دستگاه: {plan.get('devices', 1)}\n"
-            f"• لینک اتصال:\n<code>{vless_link}</code>\n\n"
-            "راهنما: کانفیگ را در اپ کلاینت وارد کرده و وصل شوید. اگر سوالی بود «🛟 پشتیبانی» در منو."
-        )
+        lines = [
+            "\u200F",
+            "🎉 اشتراک شما فعال شد.",
+            "",
+            f"• پلن: {plan['title']}",
+            f"• حجم: {plan['gb']} گیگ / مدت: {plan['days']} روز / دستگاه: {dev_count}",
+            "• لینک‌های اتصال:"
+        ]
+        for idx, link in enumerate(links, 1):
+            lines.append(f"{idx}) <code>{link}</code>")
+        lines.append("\nراهنما: هر دستگاه از یکی از لینک‌ها استفاده کند.")
+        txt = "\n".join(lines)
         try:
             await bot.send_message(int(tg_id), txt, disable_web_page_preview=True)
         except Exception:
