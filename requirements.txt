@@ -4,3 +4,4 @@ pydantic-settings>=2.0
 motor>=3.6
 pymongo~=4.14.1
 utils~=1.0.2
+segno
