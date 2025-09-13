@@ -5,7 +5,7 @@ class Settings(BaseSettings):
     BOT_TOKEN: str
     MONGO_URI: str
     MONGO_DB: str = "vira-vpn"
-    SUPPORT_USERNAME: str = "stanwitley"
+    SUPPORT_USERNAME: str = "viravpnsupport"
 
     # کارت به کارت
     C2C_CARD_NUMBER: str = "6037-9974-4031-4483"
@@ -13,11 +13,11 @@ class Settings(BaseSettings):
     C2C_DEADLINE_MIN: int = 60
 
     # چند ادمین (لیست عددی chat_id)
-    ADMIN_CHAT_IDS: list[int] = [149609494]
+    ADMIN_CHAT_IDS: list[int] = [7414949914]
 
     XRAY_CONFIG_PATH: str = "/usr/local/etc/xray/config.json"
     XRAY_SERVICE_NAME: str = "xray"
-    XRAY_DOMAIN: str = "127.0.0.1"
+    XRAY_DOMAIN: str = "193.180.211.230"
     XRAY_WS_PATH: str = "/ws8081"
     XRAY_PORT: int = 8081
     XRAY_SECURITY: str = "none"
