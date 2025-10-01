@@ -7,21 +7,23 @@ import subprocess
 import tempfile
 import uuid
 from typing import Tuple, Optional
+from urllib.parse import quote
 
 # ===== Settings (env) =====
 XRAY_CONFIG_PATH = os.getenv("XRAY_CONFIG_PATH", "/usr/local/etc/xray/config.json")
 XRAY_SERVICE_NAME = os.getenv("XRAY_SERVICE_NAME", "xray")
 
 # لینک‌سازی VLESS/WS
-XRAY_DOMAIN   = os.getenv("XRAY_DOMAIN", "127.0.0.1")
-XRAY_WS_PATH  = os.getenv("XRAY_WS_PATH", "/ws8081")
-XRAY_PORT     = int(os.getenv("XRAY_PORT", "8081"))
+XRAY_DOMAIN = os.getenv("XRAY_DOMAIN", "127.0.0.1")
+XRAY_WS_PATH = os.getenv("XRAY_WS_PATH", "/ws8081")
+XRAY_PORT = int(os.getenv("XRAY_PORT", "8081"))
 XRAY_SECURITY = os.getenv("XRAY_SECURITY", "none")  # none | tls | reality
 
 # Runtime API
-XRAY_BIN       = os.getenv("XRAY_BIN", "/usr/local/bin/xray")
-XRAY_API_ADDR  = os.getenv("XRAY_API_ADDR", "127.0.0.1:10085")
-INBOUND_TAG    = os.getenv("XRAY_INBOUND_TAG", "vless-ws")  # باید در config به inbound 8081 داده شده باشد (tag)
+XRAY_BIN = os.getenv("XRAY_BIN", "/usr/local/bin/xray")
+XRAY_API_ADDR = os.getenv("XRAY_API_ADDR", "127.0.0.1:10085")
+INBOUND_TAG = os.getenv("XRAY_INBOUND_TAG", "vless-ws")  # باید در config به inbound 8081 داده شده باشد (tag)
+
 
 # ---------- File IO helpers ----------
 def _test_config(path: str) -> None:
@@ -33,6 +35,7 @@ def _test_config(path: str) -> None:
     if p.returncode != 0:
         msg = (p.stderr or p.stdout or "").strip()
         raise RuntimeError(f"xray -test failed: {msg}")
+
 
 def _apply_config_safely(new_cfg: dict) -> None:
     """
@@ -78,7 +81,6 @@ def _apply_config_safely(new_cfg: dict) -> None:
             raise
 
 
-
 def _assert_paths():
     if not os.path.exists(XRAY_CONFIG_PATH):
         raise FileNotFoundError(f"XRAY_CONFIG_PATH not found: {XRAY_CONFIG_PATH}")
@@ -89,10 +91,12 @@ def _assert_paths():
         # ممکنه با sudo systemd مدیریت شه؛ اینجا فقط هشدار ذهنی
         pass
 
+
 def _load_config() -> dict:
     _assert_paths()
     with open(XRAY_CONFIG_PATH, "r") as f:
         return json.load(f)
+
 
 def _save_config(cfg: dict):
     """Atomic write + backup + chmod 0644 تا systemd بتونه بخونه."""
@@ -120,6 +124,7 @@ def _save_config(cfg: dict):
             except Exception:
                 pass
 
+
 # ---------- systemd helpers ----------
 def _restart_xray():
     try:
@@ -130,6 +135,7 @@ def _restart_xray():
     except subprocess.CalledProcessError as e:
         msg = e.stderr.strip() or e.stdout.strip() or str(e)
         raise RuntimeError(f"Failed to restart {XRAY_SERVICE_NAME}: {msg}")
+
 
 def _reload_xray():
     """ترجیح با reload برای حداقل قطعی؛ اگر نبود → restart."""
@@ -151,9 +157,11 @@ def _reload_xray():
                 f"Failed to reload {XRAY_SERVICE_NAME}: {msg1}; restart fallback failed: {msg2}"
             )
 
+
 # ---------- Inbound helpers (file mode) ----------
 def _safe_tag(s: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", s)
+
 
 def _find_vless_ws_inbound(cfg: dict) -> Optional[dict]:
     for ib in cfg.get("inbounds", []):
@@ -163,6 +171,7 @@ def _find_vless_ws_inbound(cfg: dict) -> Optional[dict]:
         if ib.get("protocol") == "vless" and ib.get("streamSettings", {}).get("network") == "ws":
             return ib
     return None
+
 
 def _ensure_vless_ws_inbound(cfg: dict):
     ib = _find_vless_ws_inbound(cfg)
@@ -180,13 +189,15 @@ def _ensure_vless_ws_inbound(cfg: dict):
         }
     })
 
+
 def _build_vless_ws_link(uuid_str: str, email: str) -> str:
     host = XRAY_DOMAIN
     path = XRAY_WS_PATH
     port = XRAY_PORT
-    name = _safe_tag(email)
+    name = quote(email, safe="")
     params = f"type=ws&path={path}&encryption=none&security={XRAY_SECURITY}"
     return f"vless://{uuid_str}@{host}:{port}?{params}#{name}"
+
 
 # ---------- Runtime API helpers ----------
 def _xray_api(args: list[str]) -> subprocess.CompletedProcess:
@@ -194,6 +205,7 @@ def _xray_api(args: list[str]) -> subprocess.CompletedProcess:
         [XRAY_BIN, "api", *args],
         check=True, capture_output=True, text=True
     )
+
 
 def _add_user_runtime(email: str, uuid_str: Optional[str] = None) -> str:
     """addUser روی هندلر runtime (بی‌قطعی). خروجی: لینک VLESS."""
@@ -208,6 +220,7 @@ def _add_user_runtime(email: str, uuid_str: Optional[str] = None) -> str:
     ])
     return _build_vless_ws_link(uuid_str, email)
 
+
 def _remove_user_runtime(email: str) -> bool:
     try:
         _xray_api([
@@ -219,6 +232,7 @@ def _remove_user_runtime(email: str) -> bool:
         return True
     except Exception:
         return False
+
 
 # ---------- Public API ----------
 def add_client(email: str) -> Tuple[str, str]:
@@ -246,6 +260,7 @@ def add_client(email: str) -> Tuple[str, str]:
 
     return uid, _build_vless_ws_link(uid, email)
 
+
 def remove_client(email: str) -> bool:
     """
     حذف کاربر:
@@ -269,6 +284,7 @@ def remove_client(email: str) -> bool:
         _reload_xray()
     return changed
 
+
 # ---------- Stats (traffic per user) ----------
 def _xray_api_stats_query(name: str) -> int:
     """
@@ -284,6 +300,7 @@ def _xray_api_stats_query(name: str) -> int:
         return int(out or "0")
     except Exception:
         return 0
+
 
 def get_user_traffic_bytes(email: str) -> tuple[int, int, int]:
     """بایت‌های (uplink, downlink, total) برای یک ایمیل کاربر."""

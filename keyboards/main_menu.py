@@ -21,6 +21,7 @@ def main_menu() -> ReplyKeyboardMarkup:
             ],
         ],
         resize_keyboard=True,
-        one_time_keyboard=False,  # کیبورد نمی‌پره بعد از انتخاب
-        input_field_placeholder="یکی از گزینه‌ها رو انتخاب کن…"
+        one_time_keyboard=False,   # کیبورد نمی‌پره بعد از انتخاب
+        input_field_placeholder="\u200F👇 یکی از گزینه‌ها رو انتخاب کنید",
+        is_persistent=True         # کیبورد همیشه باقی می‌مونه
     )

@@ -1,10 +1,10 @@
 # handlers/buy.py
-from aiogram import Router, F, types
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.fsm.state import StatesGroup, State
-from aiogram.fsm.context import FSMContext
-
 from datetime import datetime, timedelta
+
+from aiogram import Router, F, types
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from config import settings
 from db.mongo_crud import (
@@ -25,9 +25,16 @@ INV = "\u2063"  # متن نامرئی معتبر تلگرام
 
 # ===== کمکی‌ها =====
 PERSIAN_DIGITS = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+
+
 def fa_num(s: str) -> str: return s.translate(PERSIAN_DIGITS)
+
+
 def rtl(s: str) -> str: return "\u200F" + s
+
+
 def fmt_price(toman: int) -> str: return fa_num(f"{toman:,}") + " ت"
+
 
 def button_label(gb: int, days: int, devices: int, price_t: int) -> str:
     parts = [
@@ -37,6 +44,7 @@ def button_label(gb: int, days: int, devices: int, price_t: int) -> str:
         f"💰 {fmt_price(price_t)}",
     ]
     return rtl(SEP.join(parts))
+
 
 async def safe_edit(message: types.Message, text: str | None = None, caption: str | None = None, **kwargs):
     """اگر پیام کپشن داشت، ویرایش کپشن؛ اگر نداشت ویرایش متن."""
@@ -48,15 +56,17 @@ async def safe_edit(message: types.Message, text: str | None = None, caption: st
     except Exception:
         return await message.answer(text or caption or "", **kwargs)
 
+
 # ===== داده‌ها =====
 PLANS = [
-    {"key": "plan_mini",     "title": "💠 مینی",        "gb": 10,  "days": 30, "dev": 1, "price": 39000},
-    {"key": "plan_eco",      "title": "💠 اقتصادی",     "gb": 30,  "days": 30, "dev": 1, "price": 69000},
-    {"key": "plan_eco_plus", "title": "💠 Eco+",        "gb": 50,  "days": 30, "dev": 2, "price": 99000},
-    {"key": "plan_std1",     "title": "💠 استاندارد ۱", "gb": 70,  "days": 30, "dev": 2, "price": 119000},
-    {"key": "plan_std2",     "title": "💠 استاندارد ۲", "gb": 100, "days": 30, "dev": 2, "price": 149000},
-    {"key": "plan_std_plus", "title": "💠 استاندارد+",  "gb": 150, "days": 30, "dev": 3, "price": 199000},
+    {"key": "plan_mini", "title": "💠 مینی", "gb": 10, "days": 30, "dev": 1, "price": 39000},
+    {"key": "plan_eco", "title": "💠 اقتصادی", "gb": 30, "days": 30, "dev": 1, "price": 69000},
+    {"key": "plan_eco_plus", "title": "💠 Eco+", "gb": 50, "days": 30, "dev": 2, "price": 99000},
+    {"key": "plan_std1", "title": "💠 استاندارد ۱", "gb": 70, "days": 30, "dev": 2, "price": 119000},
+    {"key": "plan_std2", "title": "💠 استاندارد ۲", "gb": 100, "days": 30, "dev": 2, "price": 149000},
+    {"key": "plan_std_plus", "title": "💠 استاندارد+", "gb": 150, "days": 30, "dev": 3, "price": 199000},
 ]
+
 
 # ===== کیبوردها =====
 def build_plans_kb() -> types.InlineKeyboardMarkup:
@@ -68,6 +78,7 @@ def build_plans_kb() -> types.InlineKeyboardMarkup:
     kb.adjust(1)
     return kb.as_markup()
 
+
 def build_plan_actions_kb(key: str) -> types.InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text=rtl("🧾 خرید این پلن"), callback_data=f"buy:{key}")
@@ -75,12 +86,14 @@ def build_plan_actions_kb(key: str) -> types.InlineKeyboardMarkup:
     kb.adjust(1)
     return kb.as_markup()
 
+
 def build_custom_kb() -> types.InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text=rtl("🛠 ساخت پلن کاستوم"), callback_data="custom_build")
     kb.button(text=rtl("⬅️ بازگشت"), callback_data="back_to_plans")
     kb.adjust(1)
     return kb.as_markup()
+
 
 def build_after_order_kb(order_id: str, plan_key: str) -> types.InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
@@ -91,11 +104,13 @@ def build_after_order_kb(order_id: str, plan_key: str) -> types.InlineKeyboardMa
     kb.adjust(1)
     return kb.as_markup()
 
+
 def build_back_to_after_order_kb(order_id: str, plan_key: str) -> types.InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text=rtl("⬅️ برگشت به پرداخت"), callback_data=f"after_order:{order_id}:{plan_key}")
     kb.adjust(1)
     return kb.as_markup()
+
 
 def build_admin_decision_kb(payment_id: str) -> types.InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
@@ -104,12 +119,15 @@ def build_admin_decision_kb(payment_id: str) -> types.InlineKeyboardMarkup:
     kb.adjust(2)
     return kb.as_markup()
 
+
 HEADER = rtl("🎁 لطفاً یکی از سرویس‌ها را انتخاب کنید:")
+
 
 # ===== ورود به خرید =====
 @router.message(F.text == "🛒 خرید اشتراک")
 async def buy_entry(m: types.Message):
     await m.answer(HEADER if SHOW_HEADER else INV, reply_markup=build_plans_kb())
+
 
 # ===== کلیک روی پلن‌ها / کاستوم =====
 @router.callback_query(F.data.in_([p["key"] for p in PLANS] + ["plan_custom"]))
@@ -138,16 +156,19 @@ async def on_plan_clicked(cq: types.CallbackQuery):
     await cq.message.edit_text(details, reply_markup=build_plan_actions_kb(p["key"]))
     await cq.answer()
 
+
 # ===== برگشت‌ها =====
 @router.callback_query(F.data == "back_to_plans")
 async def back_to_plans(cq: types.CallbackQuery):
     await cq.message.edit_text(HEADER if SHOW_HEADER else INV, reply_markup=build_plans_kb())
     await cq.answer()
 
+
 @router.callback_query(F.data == "back_main")
 async def back_main(cq: types.CallbackQuery):
     await cq.message.edit_text(rtl("✅ به منوی اصلی برگشتی."))
     await cq.answer()
+
 
 # ===== خرید → ثبت سفارش =====
 @router.callback_query(F.data.startswith("buy:"))
@@ -171,6 +192,7 @@ async def on_buy_plan(cq: types.CallbackQuery):
     )
     await cq.answer()
 
+
 # ===== صفحه بعد از سفارش =====
 @router.callback_query(F.data.startswith("after_order:"))
 async def on_after_order(cq: types.CallbackQuery):
@@ -181,12 +203,14 @@ async def on_after_order(cq: types.CallbackQuery):
     )
     await cq.answer()
 
+
 # ===== تغییر پلن =====
 @router.callback_query(F.data.startswith("change_plan:"))
 async def on_change_plan(cq: types.CallbackQuery):
     # (اختیاری) می‌تونی سفارش قبلی را cancel کنی؛ فعلاً فقط برمی‌گردونیم به انتخاب پلن
     await cq.message.edit_text(HEADER if SHOW_HEADER else INV, reply_markup=build_plans_kb())
     await cq.answer("پلن جدید را انتخاب کنید.")
+
 
 # ===== انصراف از سفارش =====
 @router.callback_query(F.data.startswith("cancel_order:"))
@@ -208,20 +232,28 @@ async def on_cancel_order(cq: types.CallbackQuery):
     )
     await cq.answer("سفارش لغو شد.")
 
+
 # ===== استیت‌های کارت‌به‌کارت =====
 class C2C(StatesGroup):
     WaitingProof = State()
+
+
+def rtl(s: str) -> str: return "\u200F" + s
+
+
+def ltr(s: str) -> str: return "\u2066" + s + "\u2069"  # LTR isolate
+
 
 def c2c_instruction_text(amount_toman: int, deadline_min: int) -> str:
     lines = [
         "💳 پرداخت کارت‌به‌کارت",
         "",
         f"• مبلغ: {fmt_price(amount_toman)}",
-        f"• کارت: {settings.C2C_CARD_NUMBER}",
+        f"• کارت: {ltr(str(settings.C2C_CARD_NUMBER))}",
         f"• {settings.C2C_CARD_NAME}",
     ]
     if getattr(settings, "C2C_SHEBA", None):
-        lines.append(f"• شبا: {settings.C2C_SHEBA}")
+        lines.append(f"• شبا: {ltr(settings.C2C_SHEBA)}")
     lines += [
         "",
         "✅ لطفاً پس از واریز، رسید را به‌صورت عکس ارسال کنید.",
@@ -231,11 +263,13 @@ def c2c_instruction_text(amount_toman: int, deadline_min: int) -> str:
     ]
     return rtl("\n".join(lines))
 
+
 def build_c2c_back_kb(order_id: str, plan_key: str) -> types.InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text=rtl("⬅️ برگشت به پرداخت"), callback_data=f"after_order:{order_id}:{plan_key}")
     kb.adjust(1)
     return kb.as_markup()
+
 
 # ===== آغاز کارت‌به‌کارت =====
 @router.callback_query(F.data.startswith("pay_c2c:"))
@@ -259,6 +293,7 @@ async def start_c2c(cq: types.CallbackQuery, state: FSMContext):
         reply_markup=build_c2c_back_kb(order_id, plan_key)
     )
     await cq.answer()
+
 
 # ===== دریافت رسید (عکس/فایل/متن) =====
 @router.message(C2C.WaitingProof, F.photo | F.document | F.text)
@@ -296,10 +331,10 @@ async def receive_c2c_proof(m: types.Message, state: FSMContext):
         return
 
     caption = (
-        rtl("🧾 رسید جدید کارت‌به‌کارت ثبت شد") + "\n" +
-        rtl(f"• سفارش: #{order_id[-6:]}") + "\n" +
-        rtl(f"• مبلغ: {fmt_price(order['amount_toman'])}") + "\n" +
-        rtl(f"• کاربر: @{m.from_user.username or 'بدون‌نام‌کاربری'} ({m.from_user.id})")
+            rtl("🧾 رسید جدید کارت‌به‌کارت ثبت شد") + "\n" +
+            rtl(f"• سفارش: #{order_id[-6:]}") + "\n" +
+            rtl(f"• مبلغ: {fmt_price(order['amount_toman'])}") + "\n" +
+            rtl(f"• کاربر: @{m.from_user.username or 'بدون‌نام‌کاربری'} ({m.from_user.id})")
     )
     admin_kb = build_admin_decision_kb(payment_id)
 
@@ -320,9 +355,11 @@ async def receive_c2c_proof(m: types.Message, state: FSMContext):
         reply_markup=build_c2c_back_kb(order_id, plan_key)
     )
 
+
 # ===== ادمین: تایید/رد =====
 def is_admin(user_id: int) -> bool:
     return user_id in set(getattr(settings, "ADMIN_CHAT_IDS", []))
+
 
 @router.callback_query(F.data.startswith("approve_payment:"))
 async def on_approve_payment(cq: types.CallbackQuery):
@@ -364,9 +401,11 @@ async def on_approve_payment(cq: types.CallbackQuery):
             user = await get_user_by_id(order["user_id"])
             if user and user.get("tg_id") is not None:
                 try:
-                    await cq.bot.send_message(int(user["tg_id"]), rtl("🎉 پرداخت شما تایید شد و اشتراک فعال گردید. ممنون از خرید شما."))
+                    await cq.bot.send_message(int(user["tg_id"]),
+                                              rtl("🎉 پرداخت شما تایید شد و اشتراک فعال گردید. ممنون از خرید شما."))
                 except Exception:
                     pass
+
 
 @router.callback_query(F.data.startswith("reject_payment:"))
 async def on_reject_payment(cq: types.CallbackQuery):
@@ -389,6 +428,7 @@ async def on_reject_payment(cq: types.CallbackQuery):
             user = await get_user_by_id(order["user_id"])
             if user and user.get("tg_id") is not None:
                 try:
-                    await cq.bot.send_message(int(user["tg_id"]), rtl("⚠️ پرداخت شما تایید نشد. لطفاً با پشتیبانی در تماس باشید یا مجدداً پرداخت کنید."))
+                    await cq.bot.send_message(int(user["tg_id"]),
+                                              rtl("⚠️ پرداخت شما تایید نشد. لطفاً با پشتیبانی در تماس باشید یا مجدداً پرداخت کنید."))
                 except Exception:
                     pass

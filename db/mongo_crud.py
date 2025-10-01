@@ -1,13 +1,13 @@
 # db/mongo_crud.py
 from datetime import datetime, timedelta
-from bson import ObjectId, Int64
+from bson import ObjectId
+from bson.int64 import Int64  # ✅ درست
 from typing import Any, Literal, TypedDict
 
 from db.mongo import users_col, plans_col, orders_col, subscriptions_col, admins_col, payments_col
 
 # ---- Users
 async def get_or_create_user(tg_id: int, username: str | None, first_name: str | None):
-    # اختلاف نوع int/Int64 را پوشش بده
     u = await users_col.find_one({"tg_id": {"$in": [tg_id, Int64(tg_id)]}})
     if u:
         await users_col.update_one(
@@ -69,7 +69,9 @@ async def create_order(user_id: ObjectId, plan_code: str, amount_toman: int, met
     doc["_id"] = res.inserted_id
     return doc
 
-async def mark_order_paid(order_id: ObjectId, provider: str, provider_ref: str):
+# ✅ امن‌تر: اطمینان از ObjectId بودن
+async def mark_order_paid(order_id: ObjectId | str, provider: str, provider_ref: str):
+    order_id = _to_object_id(order_id)
     await orders_col.update_one(
         {"_id": order_id},
         {"$set": {
@@ -87,13 +89,13 @@ async def create_subscription_from_plan(user_id: ObjectId, order_id: ObjectId, p
         "user_id": user_id,
         "order_id": order_id,
         "source_plan": plan["code"],
-        "quota_mb": int(plan["gb"]) * 1024,   # به MB
+        "quota_mb": int(plan["gb"]) * 1024,
         "used_mb": 0,
         "devices": plan["devices"],
         "start_at": now,
         "end_at": now + timedelta(days=plan["days"]),
         "status": "active",
-        "config_ref": config_ref,
+        "config_ref": config_ref,  # برای جریان جدید از services/provision استفاده می‌کنیم
     }
     res = await subscriptions_col.insert_one(doc)
     doc["_id"] = res.inserted_id
@@ -231,7 +233,6 @@ async def update_payment_status(
     res = await payments_col.update_one({"_id": _to_object_id(payment_id)}, {"$set": update})
     return res.modified_count > 0
 
-# شورتکات: تایید پرداخت کارت‌به‌کارت + نهایی کردن سفارش
 async def approve_c2c_payment_and_mark_order_paid(payment_id: ObjectId | str, reviewer_uid: int | None = None) -> bool:
     payment = await get_payment_by_id(payment_id)
     if not payment:
@@ -242,11 +243,9 @@ async def approve_c2c_payment_and_mark_order_paid(payment_id: ObjectId | str, re
     await mark_order_paid(order_id, provider="c2c", provider_ref=str(payment["_id"]))
     return ok1
 
-# شورتکات: رد پرداخت
 async def reject_c2c_payment(payment_id: ObjectId | str, reviewer_uid: int | None = None, reason: str | None = None) -> bool:
     return await update_payment_status(payment_id, "rejected", reviewer_uid=reviewer_uid, reason=reason)
 
-# انقضای پرداخت‌های بازِ یک سفارش (برای انصراف)
 async def expire_open_payments_for_order(order_id: ObjectId | str) -> int:
     order_id = _to_object_id(order_id)
     res = await payments_col.update_many(
@@ -255,7 +254,6 @@ async def expire_open_payments_for_order(order_id: ObjectId | str) -> int:
     )
     return res.modified_count or 0
 
-# (اختیاری) لیست پرداخت‌ها
 async def list_payments(status: Literal["pending_proof", "submitted", "approved", "rejected", "expired"] | None = None, limit: int = 50):
     filt = {}
     if status:

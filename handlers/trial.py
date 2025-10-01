@@ -1,26 +1,32 @@
 # handlers/trial.py
-from aiogram import Router, types, F
-from aiogram.types import BufferedInputFile
 from datetime import datetime, timedelta
 
-from db.mongo_crud import get_or_create_user
+from aiogram import Router, types, F
+from aiogram.types import BufferedInputFile, InputMediaPhoto
+
 from db.mongo import subscriptions_col
-from services.xray_service import add_client
+from db.mongo_crud import get_or_create_user
 from services.qrcode_gen import make_qr_png_bytes
+from services.xray_service import add_client
+
 
 def rtl(s: str) -> str: return "\u200F" + s
+
+
 def fa_num(s: str) -> str:
     tbl = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
     return str(s).translate(tbl)
+
 
 router = Router()
 
 # تعداد دستگاه واقعاً enforce می‌شود (برای هر device یک UUID/لینک جدا)
 TRIAL_CONF = {
-    "quota_mb": 300,   # مگابایت
-    "hours": 24,       # ساعت
-    "devices": 1,      # اگر 2 یا بیشتر بگذاری، به همان تعداد لینک/QR می‌سازیم
+    "quota_mb": 300,  # مگابایت
+    "hours": 24,  # ساعت
+    "devices": 1,  # اگر 2 یا بیشتر بگذاری، به همان تعداد لینک/QR می‌سازیم
 }
+
 
 def _fmt_trial_msg(links: list[str], end_at: datetime) -> str:
     header = rtl(
@@ -38,6 +44,7 @@ def _fmt_trial_msg(links: list[str], end_at: datetime) -> str:
     lines.append(rtl("\nهر دستگاه از یکی از لینک‌ها استفاده کند."))
     return "\n".join(lines)
 
+
 async def _ensure_trial_links(user_id: int, sub_id, dev_count: int) -> tuple[list[str], list[dict]]:
     """
     مطمئن می‌شود برای اشتراک تِست، به تعداد devices لینک/UUID وجود دارد.
@@ -45,6 +52,9 @@ async def _ensure_trial_links(user_id: int, sub_id, dev_count: int) -> tuple[lis
     خروجی: (links, xray_accounts)
     """
     doc = await subscriptions_col.find_one({"_id": sub_id})
+    if not doc:
+        return [], []
+
     links = doc.get("config_ref")
     xinfo = doc.get("xray")
 
@@ -64,7 +74,6 @@ async def _ensure_trial_links(user_id: int, sub_id, dev_count: int) -> tuple[lis
 
     # اضافه کردن تا رسیدن به dev_count
     made_new = False
-    i = 0
     while len(links) < dev_count:
         i = len(links) + 1
         email = f"trial-{user_id}-{i}@bot"
@@ -79,6 +88,66 @@ async def _ensure_trial_links(user_id: int, sub_id, dev_count: int) -> tuple[lis
             {"$set": {"config_ref": links, "xray": accounts}}
         )
     return links, accounts
+
+
+async def _send_links_with_qr(m: types.Message, links: list[str], end_at: datetime):
+    """
+    ارسال لینک‌ها + QR:
+      - اگر 0 لینک: فقط متن
+      - اگر 1 لینک: send_photo
+      - اگر >=2 لینک: media_group
+    """
+    caption = _fmt_trial_msg(links, end_at)
+
+    if not links:
+        await m.answer(caption, parse_mode="HTML")
+        return
+
+    # ساخت QRهای همه لینک‌ها
+    photos: list[InputMediaPhoto] = []
+    pngs: list[bytes] = []
+    for link in links:
+        try:
+            pngs.append(make_qr_png_bytes(link))
+        except Exception:
+            pngs.append(None)
+
+    if len(links) == 1:
+        # یک عکس
+        if pngs[0]:
+            await m.answer_photo(
+                photo=BufferedInputFile(pngs[0], filename="trial_1.png"),
+                caption=caption,
+                parse_mode="HTML"
+            )
+        else:
+            await m.answer(caption, parse_mode="HTML")
+        return
+
+    # گروه (حداقل ۲)
+    for idx, (link, png) in enumerate(zip(links, pngs), 1):
+        if png:
+            photos.append(InputMediaPhoto(
+                media=BufferedInputFile(png, filename=f"trial_{idx}.png"),
+                caption=caption if idx == 1 else None,
+                parse_mode="HTML"
+            ))
+        else:
+            # اگر QR تولید نشد، حداقل کپشن متن را جدا بفرستیم (یک‌بار)
+            if idx == 1:
+                await m.answer(caption, parse_mode="HTML")
+
+    if photos:
+        # اگر به هر دلیلی فقط یک آیتم معتبر شد، باز هم باید تک‌عکس بفرستیم نه مدیاگروپ
+        if len(photos) == 1:
+            await m.answer_photo(
+                photo=photos[0].media,
+                caption=caption,
+                parse_mode="HTML"
+            )
+        else:
+            await m.answer_media_group(photos)
+
 
 @router.message(F.text == "🧪 اکانت تست")
 async def trial_handler(m: types.Message):
@@ -100,28 +169,15 @@ async def trial_handler(m: types.Message):
     })
     if existed:
         links, _ = await _ensure_trial_links(m.from_user.id, existed["_id"], dev_count)
-
-        # ارسال QR چندتایی
-        media = []
-        for i, link in enumerate(links, 1):
-            png = make_qr_png_bytes(link)
-            media.append(types.InputMediaPhoto(
-                media=BufferedInputFile(png, filename=f"trial_{i}.png"),
-                caption=_fmt_trial_msg(links, existed["end_at"]) if i == 1 else None,
-                parse_mode="HTML"
-            ))
-        if media:
-            await m.answer_media_group(media)
-        else:
-            await m.answer(_fmt_trial_msg(links, existed["end_at"]), parse_mode="HTML")
+        await _send_links_with_qr(m, links, existed["end_at"])
         return
 
     # ساخت تِست جدید
     end_at = now + timedelta(hours=TRIAL_CONF["hours"])
-    links = []
-    accounts = []
+    links: list[str] = []
+    accounts: list[dict] = []
     for i in range(dev_count):
-        email = f"trial-{m.from_user.id}-{i+1}@bot"
+        email = f"trial-{m.from_user.id}-{i + 1}@bot"
         uuid_str, vless_link = add_client(email)
         links.append(vless_link)
         accounts.append({"email": email, "uuid": uuid_str})
@@ -136,21 +192,9 @@ async def trial_handler(m: types.Message):
         "start_at": now,
         "end_at": end_at,
         "status": "active",
-        "config_ref": links,   # لیست لینک‌ها
-        "xray": accounts,      # لیست ایمیل/UUID
+        "config_ref": links,  # لیست لینک‌ها
+        "xray": accounts,  # لیست ایمیل/UUID
     }
-    res = await subscriptions_col.insert_one(sub_doc)
+    await subscriptions_col.insert_one(sub_doc)
 
-    # QR چندتایی
-    media = []
-    for i, link in enumerate(links, 1):
-        png = make_qr_png_bytes(link)
-        media.append(types.InputMediaPhoto(
-            media=BufferedInputFile(png, filename=f"trial_{i}.png"),
-            caption=_fmt_trial_msg(links, end_at) if i == 1 else None,
-            parse_mode="HTML"
-        ))
-    if media:
-        await m.answer_media_group(media)
-    else:
-        await m.answer(_fmt_trial_msg(links, end_at), parse_mode="HTML")
+    await _send_links_with_qr(m, links, end_at)
