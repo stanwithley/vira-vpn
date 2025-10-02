@@ -7,7 +7,6 @@ import subprocess
 import tempfile
 import uuid
 from typing import Tuple, Optional
-from urllib.parse import quote
 
 # ===== Settings (env) =====
 XRAY_CONFIG_PATH = os.getenv("XRAY_CONFIG_PATH", "/usr/local/etc/xray/config.json")
@@ -191,12 +190,19 @@ def _ensure_vless_ws_inbound(cfg: dict):
 
 
 def _build_vless_ws_link(uuid_str: str, email: str) -> str:
-    host = XRAY_DOMAIN
+    # sanitize host: strip spaces/comments/rtl marks
+    raw_host = str(XRAY_DOMAIN or "").strip()
+    raw_host = re.split(r"[#\s]", raw_host, 1)[0].strip()
+    raw_host = raw_host.replace("\u200f", "").replace("\u200e", "").replace("\u2066", "").replace("\u2069", "")
+    host = raw_host or "127.0.0.1"
+
     path = XRAY_WS_PATH
     port = XRAY_PORT
-    name = quote(email, safe="")
+    # tag/fragment: only safe URL chars
+    from urllib.parse import quote
+    frag = quote(re.sub(r"[^A-Za-z0-9._@+-]+", "_", email), safe="")
     params = f"type=ws&path={path}&encryption=none&security={XRAY_SECURITY}"
-    return f"vless://{uuid_str}@{host}:{port}?{params}#{name}"
+    return f"vless://{uuid_str}@{host}:{port}?{params}#{frag}"
 
 
 # ---------- Runtime API helpers ----------

@@ -249,11 +249,11 @@ def c2c_instruction_text(amount_toman: int, deadline_min: int) -> str:
         "💳 پرداخت کارت‌به‌کارت",
         "",
         f"• مبلغ: {fmt_price(amount_toman)}",
-        f"• کارت: {ltr(str(settings.C2C_CARD_NUMBER))}",
-        f"• {settings.C2C_CARD_NAME}",
+        f"• کارت: <code>{settings.C2C_CARD_NUMBER}</code>",  # ← LTR + قابل‌کپی
+        f"• به‌نام: {settings.C2C_CARD_NAME}",
     ]
     if getattr(settings, "C2C_SHEBA", None):
-        lines.append(f"• شبا: {ltr(settings.C2C_SHEBA)}")
+        lines.append(f"• شبا: <code>{settings.C2C_SHEBA}</code>")
     lines += [
         "",
         "✅ لطفاً پس از واریز، رسید را به‌صورت عکس ارسال کنید.",
@@ -290,7 +290,8 @@ async def start_c2c(cq: types.CallbackQuery, state: FSMContext):
 
     await cq.message.edit_text(
         c2c_instruction_text(amount_toman, getattr(settings, "C2C_DEADLINE_MIN", 60)),
-        reply_markup=build_c2c_back_kb(order_id, plan_key)
+        reply_markup=build_c2c_back_kb(order_id, plan_key),
+        parse_mode="HTML",
     )
     await cq.answer()
 
