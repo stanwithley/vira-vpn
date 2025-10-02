@@ -13,7 +13,7 @@ from db.mongo_crud import (
     create_payment_request, attach_proof_to_payment,
     get_payment_by_id, get_user_by_id,
     approve_c2c_payment_and_mark_order_paid, reject_c2c_payment,
-    expire_open_payments_for_order,
+    expire_open_payments_for_order, is_admin_db,
 )
 
 router = Router()
@@ -358,8 +358,18 @@ async def receive_c2c_proof(m: types.Message, state: FSMContext):
 
 
 # ===== ادمین: تایید/رد =====
+
 def is_admin(user_id: int) -> bool:
-    return user_id in set(getattr(settings, "ADMIN_CHAT_IDS", []))
+    # Owner هم ادمین محسوب میشه
+    try:
+        from config import settings
+        if int(user_id) == int(getattr(settings, "OWNER_UID")):
+            return True
+    except Exception:
+        pass
+    # بقیه ادمین‌ها از DB
+    import asyncio
+    return asyncio.get_event_loop().run_until_complete(is_admin_db(user_id))
 
 
 @router.callback_query(F.data.startswith("approve_payment:"))
