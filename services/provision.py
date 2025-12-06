@@ -4,13 +4,16 @@ from aiogram import Bot
 from bson import ObjectId
 
 from db.mongo import subscriptions_col, plans_col, orders_col, users_col
-from services.xray_service import add_client
-from services.links import vless_ws_link  # سازنده لینک یکدست و تمیز
-from config import settings               # تا XRAY_* را از .env بخوانیم
+# تغییر مهم: استفاده از سرویس جدید
+from services.xray_service import XrayService
+from config import settings
+
+# ساخت نمونه از کلاس ارتباط با پنل
+xray = XrayService()
 
 
 async def provision_paid_order(order_id: ObjectId, bot: Bot) -> bool:
-    # --- اعتبارسنجی سفارش/کاربر/پلن ---
+    # 1. دریافت اطلاعات سفارش
     order = await orders_col.find_one({"_id": ObjectId(str(order_id))})
     if not order or order.get("status") != "paid":
         return False
@@ -23,67 +26,81 @@ async def provision_paid_order(order_id: ObjectId, bot: Bot) -> bool:
     if not plan:
         return False
 
-    # --- تعداد دستگاه ---
+    # 2. آماده‌سازی اطلاعات برای پنل
+    # نام‌گذاری ایمیل: u[آیدی‌تلگرام]-[تکه‌ای‌از‌سفارش]
+    # مثال: u12345678-a1b2
+    email = f"u{user.get('tg_id')}-{str(order['_id'])[-4:]}"
+
     dev_count = int(plan.get("devices", 1))
+    total_gb = int(plan.get("gb", 0))
+    days = int(plan.get("days", 30))
 
-    # --- برای هر دستگاه: add_client (گرفتن UUID) + ساخت لینک با env جاری ---
-    links: list[str] = []
-    xray_accounts: list[dict] = []
+    # 3. ارسال درخواست به پنل (API)
+    # به جای حلقه زدن، یک اکانت با لیمیت آی‌پی می‌سازیم
+    result = await xray.add_client(
+        email=email,
+        limit_ip=dev_count,
+        total_gb=total_gb,
+        expire_days=days
+    )
 
-    # مقادیر اتصال از .env / settings
-    host     = getattr(settings, "XRAY_HOST", getattr(settings, "XRAY_DOMAIN", "127.0.0.1"))
-    port     = int(getattr(settings, "XRAY_PORT", 8081))
-    ws_path  = getattr(settings, "XRAY_WS_PATH", "/ws8081")
-    security = getattr(settings, "XRAY_SECURITY", "none")
+    if not result:
+        # اگر خطا داد (مثلاً پنل پایین بود)
+        try:
+            await bot.send_message(settings.ADMIN_CHAT_IDS[0], f"⚠️ خطا در ساخت سرویس برای سفارش {order_id}")
+        except:
+            pass
+        return False
 
-    for i in range(dev_count):
-        # ایمیل یکتا برای آمار و مدیریت
-        email = f"{str(user['_id'])[-6:]}-{str(order['_id'])[-6:]}-{i+1}@bot"
+    # استخراج اطلاعات ساخته شده
+    uuid_str = result["uuid"]
+    vless_link = result["link"]
 
-        # add_client: یوزر را به Xray اضافه می‌کند و UUID می‌دهد
-        uuid_str, _unused_link = add_client(email)
+    # ساخت لینک اشتراک (هوشمند)
+    # مثال: http://ip:port/sub/UUID
+    sub_link = f"{settings.PANEL_URL.rstrip('/')}/sub/{uuid_str}"
 
-        # لینک استاندارد و تمیز با سازنده‌ی مشترک
-        tag = f"{(user.get('username') or str(user.get('tg_id') or 'user')).replace('@','')}-{i+1}"
-        link = vless_ws_link(uuid_str, host, port, ws_path, security, tag)
-
-        links.append(link)
-        xray_accounts.append({"email": email, "uuid": uuid_str})
-
-    # --- ثبت اشتراک در DB ---
+    # 4. ذخیره در دیتابیس (با فرمت جدید)
     now = datetime.utcnow()
     sub_doc = {
         "user_id": user["_id"],
         "order_id": order["_id"],
         "source_plan": plan["code"],
-        "quota_mb": int(plan["gb"]) * 1024,  # MB
+        "quota_mb": total_gb * 1024,
         "used_mb": 0,
         "devices": dev_count,
         "start_at": now,
-        "end_at": now + timedelta(days=int(plan["days"])),
+        "end_at": now + timedelta(days=days),
         "status": "active",
-        "config_ref": links,      # لیست لینک‌ها
-        "xray": xray_accounts,    # ایمیل/UUID برای مدیریت و آمار
+
+        # فیلدهای حیاتی جدید
+        "uuid": uuid_str,
+        "email": email,
+        "config_ref": [vless_link],  # لینک مستقیم به عنوان بکاپ
+        "xray": [{"email": email, "uuid": uuid_str}]  # جهت سازگاری
     }
     await subscriptions_col.insert_one(sub_doc)
 
-    # --- ارسال لینک‌ها به کاربر ---
+    # 5. ارسال پیام تبریک به کاربر
     tg_id = user.get("tg_id")
     if tg_id is not None:
-        # پیام HTML: چون <code> داریم، parse_mode="HTML" لازم است
-        # هر لینک در خط جدا + بدون هیچ متن وسط لینک
         lines = [
-            "\u200F",
-            "🎉 اشتراک شما فعال شد.",
+            "\u200F",  # راست‌چین ساز
+            "🎉 <b>اشتراک شما با موفقیت فعال شد!</b>",
             "",
-            f"• پلن: {plan['title']}",
-            f"• حجم: {plan['gb']} گیگ / مدت: {plan['days']} روز / دستگاه: {dev_count}",
-            "• لینک‌های اتصال:",
+            f"🏷 پلن: {plan['title']}",
+            f"📊 حجم: {plan['gb']} گیگ",
+            f"⏳ مدت: {plan['days']} روز",
+            f"📱 تعداد کاربر مجاز: {dev_count} نفر",
+            "",
+            "⬇️ <b>لینک اشتراک (پیشنهادی):</b>",
+            f"<code>{sub_link}</code>",
+            "",
+            "ℹ️ این لینک را در نرم‌افزار (v2rayNG / V2Box / Streisand) وارد کنید و Update بزنید.",
+            "",
+            "🔗 <b>لینک مستقیم (کمکی):</b>",
+            f"<code>{vless_link}</code>"
         ]
-        for idx, link in enumerate(links, 1):
-            lines.append(f"{idx}) <code>{link}</code>")
-        lines.append("")
-        lines.append("راهنما: هر دستگاه از یکی از لینک‌ها استفاده کند.")
 
         txt = "\n".join(lines)
         try:

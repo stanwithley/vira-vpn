@@ -1,6 +1,8 @@
 # main.py
 import asyncio
 import signal
+import logging  # <--- اضافه شد
+import sys
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -14,13 +16,23 @@ from handlers import start, trial, buy, renew, wallet, mysubs, help as help_h, s
 from services.enforcer import expire_loop
 from services.quota_enforcer import quota_loop
 
+# تنظیمات لاگینگ (نمایش ساعت و سطح ارور)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
+
 
 async def main():
     bot = Bot(token=settings.BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
-    # اگر قبلاً وبهوک بوده، قطعش کن و پیام‌های معوقه رو نادیده بگیر
+
+    # حذف وب‌هوک‌های قبلی
     await bot.delete_webhook(drop_pending_updates=True)
 
-    # دیتابیس و اسکیمای اولیه
+    # راه‌اندازی دیتابیس
+    logger.info("⚙️ Initializing Database...")
     await ensure_collections_and_validators()
     await ensure_indexes()
     await ensure_default_plans()
@@ -45,12 +57,21 @@ async def main():
         asyncio.create_task(quota_loop(bot), name="quota_loop"),
     ]
 
-    print("🤖 Bot is running...")
+    logger.info("🤖 Bot is running...")
 
-    # هندل سیگنال برای توقف تمیز
+    # === ارسال پیام به ادمین موقع روشن شدن ===
+    try:
+        # فرض بر اینه که توی config.py متغیر ADMIN_ID داری
+        # اگر اسمش فرق داره، اینجا اصلاحش کن
+        await bot.send_message(settings.ADMIN_ID, "✅ <b>Bot Started Successfully!</b>")
+    except Exception as e:
+        logger.error(f"Failed to send startup message to admin: {e}")
+    # ========================================
+
     stop_event = asyncio.Event()
 
     def _stop(*_):
+        logger.info("🛑 Stopping bot...")
         stop_event.set()
 
     loop = asyncio.get_running_loop()
@@ -58,19 +79,21 @@ async def main():
         try:
             loop.add_signal_handler(sig, _stop)
         except NotImplementedError:
-            # روی ویندوز ممکنه در دسترس نباشه
             pass
 
-    # polling
     try:
         await dp.start_polling(bot, allowed_updates=None)
     finally:
-        # توقف تمیز تسک‌ها
+        logger.info("♻️ Cleaning up tasks...")
         for t in bg_tasks:
             t.cancel()
         await asyncio.gather(*bg_tasks, return_exceptions=True)
         await bot.session.close()
+        logger.info("👋 Bot stopped.")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot stopped manually.")

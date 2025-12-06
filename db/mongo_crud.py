@@ -83,7 +83,15 @@ async def mark_order_paid(order_id: ObjectId | str, provider: str, provider_ref:
     )
 
 # ---- Subscriptions
-async def create_subscription_from_plan(user_id: ObjectId, order_id: ObjectId, plan: dict, config_ref: str | None = None):
+# تغییر یافته تابع create_subscription_from_plan
+async def create_subscription_from_plan(
+        user_id: ObjectId,
+        order_id: ObjectId,
+        plan: dict,
+        uuid: str | None = None,  # <--- این اضافه شد
+        email: str | None = None,  # <--- این هم اضافه شد (برای پیدا کردن در پنل)
+        config_ref: str | None = None
+):
     now = datetime.utcnow()
     doc = {
         "user_id": user_id,
@@ -95,7 +103,11 @@ async def create_subscription_from_plan(user_id: ObjectId, order_id: ObjectId, p
         "start_at": now,
         "end_at": now + timedelta(days=plan["days"]),
         "status": "active",
-        "config_ref": config_ref,  # برای جریان جدید از services/provision استفاده می‌کنیم
+
+        # اطلاعات حیاتی برای اتصال به پنل
+        "uuid": uuid,  # کد کانفیگ
+        "email": email,  # ایمیل کاربر در پنل
+        "config_ref": config_ref,
     }
     res = await subscriptions_col.insert_one(doc)
     doc["_id"] = res.inserted_id

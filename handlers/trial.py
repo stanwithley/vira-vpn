@@ -1,13 +1,14 @@
 # handlers/trial.py
 from datetime import datetime, timedelta
-
 from aiogram import Router, types, F
 from aiogram.types import BufferedInputFile, InputMediaPhoto
 
 from db.mongo import subscriptions_col
 from db.mongo_crud import get_or_create_user
 from services.qrcode_gen import make_qr_png_bytes
-from services.xray_service import add_client
+# تغییر مهم: ایمپورت کلاس جدید
+from services.xray_service import XrayService
+from config import settings
 
 
 def rtl(s: str) -> str: return "\u200F" + s
@@ -20,133 +21,62 @@ def fa_num(s: str) -> str:
 
 router = Router()
 
-# تعداد دستگاه واقعاً enforce می‌شود (برای هر device یک UUID/لینک جدا)
+# تنظیمات تست رایگان
 TRIAL_CONF = {
-    "quota_mb": 300,  # مگابایت
+    "quota_mb": 500,  # مگابایت
     "hours": 24,  # ساعت
-    "devices": 1,  # اگر 2 یا بیشتر بگذاری، به همان تعداد لینک/QR می‌سازیم
+    "limit_ip": 1  # تعداد کاربر همزمان
 }
 
+# نمونه‌سازی از سرویس پنل
+xray = XrayService()
 
-def _fmt_trial_msg(links: list[str], end_at: datetime) -> str:
+
+def _fmt_trial_msg(links: list[str], sub_link: str, end_at: datetime) -> str:
     header = rtl(
         "✅ اکانت تست فعال شد.\n\n"
         f"• حجم: {fa_num(TRIAL_CONF['quota_mb'])} مگ\n"
         f"• مدت: {fa_num(TRIAL_CONF['hours'])} ساعت\n"
-        f"• دستگاه: {fa_num(TRIAL_CONF['devices'])}\n"
-        f"• پایان: {end_at:%Y-%m-%d %H:%M UTC}\n"
+        f"• پایان: {end_at:%Y-%m-%d %H:%M}\n"
         "—\n"
-        "🔗 لینک‌های اتصال:"
     )
-    lines = [header]
-    for i, link in enumerate(links, 1):
-        lines.append(f"{i}) <code>{link}</code>")
-    lines.append(rtl("\nهر دستگاه از یکی از لینک‌ها استفاده کند."))
-    return "\n".join(lines)
+
+    body = []
+    # 1. لینک اشتراک (مهمترین)
+    if sub_link:
+        body.append(rtl("🔄 <b>لینک اشتراک (هوشمند):</b>"))
+        body.append(f"<code>{sub_link}</code>\n")
+
+    # 2. لینک اتصال مستقیم
+    if links:
+        body.append(rtl("🔗 <b>لینک اتصال مستقیم:</b>"))
+        for i, link in enumerate(links, 1):
+            body.append(f"<code>{link}</code>")
+
+    body.append(rtl("\nنکته: برای اتصال بهتر، از لینک اشتراک استفاده کنید."))
+
+    return header + "\n".join(body)
 
 
-async def _ensure_trial_links(user_id: int, sub_id, dev_count: int) -> tuple[list[str], list[dict]]:
-    """
-    مطمئن می‌شود برای اشتراک تِست، به تعداد devices لینک/UUID وجود دارد.
-    اگر نبود، می‌سازد و در DB ذخیره می‌کند.
-    خروجی: (links, xray_accounts)
-    """
-    doc = await subscriptions_col.find_one({"_id": sub_id})
-    if not doc:
-        return [], []
+async def _send_links_with_qr(m: types.Message, links: list[str], sub_link: str, end_at: datetime):
+    caption = _fmt_trial_msg(links, sub_link, end_at)
 
-    links = doc.get("config_ref")
-    xinfo = doc.get("xray")
+    # اولویت QR با لینک اشتراک است، اگر نبود لینک اول
+    qr_target = sub_link if sub_link else (links[0] if links else None)
 
-    # نرمالایز به ساختار جدید: links = list[str] و xray = list[{"email","uuid"}]
-    if isinstance(links, str):
-        links = [links]
-    elif not isinstance(links, list):
-        links = []
-
-    accounts: list[dict] = []
-    if isinstance(xinfo, dict) and ("email" in xinfo or "uuid" in xinfo):
-        accounts = [xinfo]
-    elif isinstance(xinfo, list):
-        accounts = xinfo
-    else:
-        accounts = []
-
-    # اضافه کردن تا رسیدن به dev_count
-    made_new = False
-    while len(links) < dev_count:
-        i = len(links) + 1
-        email = f"trial-{user_id}-{i}@bot"
-        uuid_str, vless_link = add_client(email)
-        links.append(vless_link)
-        accounts.append({"email": email, "uuid": uuid_str})
-        made_new = True
-
-    if made_new:
-        await subscriptions_col.update_one(
-            {"_id": sub_id},
-            {"$set": {"config_ref": links, "xray": accounts}}
-        )
-    return links, accounts
-
-
-async def _send_links_with_qr(m: types.Message, links: list[str], end_at: datetime):
-    """
-    ارسال لینک‌ها + QR:
-      - اگر 0 لینک: فقط متن
-      - اگر 1 لینک: send_photo
-      - اگر >=2 لینک: media_group
-    """
-    caption = _fmt_trial_msg(links, end_at)
-
-    if not links:
+    if not qr_target:
         await m.answer(caption, parse_mode="HTML")
         return
 
-    # ساخت QRهای همه لینک‌ها
-    photos: list[InputMediaPhoto] = []
-    pngs: list[bytes] = []
-    for link in links:
-        try:
-            pngs.append(make_qr_png_bytes(link))
-        except Exception:
-            pngs.append(None)
-
-    if len(links) == 1:
-        # یک عکس
-        if pngs[0]:
-            await m.answer_photo(
-                photo=BufferedInputFile(pngs[0], filename="trial_1.png"),
-                caption=caption,
-                parse_mode="HTML"
-            )
-        else:
-            await m.answer(caption, parse_mode="HTML")
-        return
-
-    # گروه (حداقل ۲)
-    for idx, (link, png) in enumerate(zip(links, pngs), 1):
-        if png:
-            photos.append(InputMediaPhoto(
-                media=BufferedInputFile(png, filename=f"trial_{idx}.png"),
-                caption=caption if idx == 1 else None,
-                parse_mode="HTML"
-            ))
-        else:
-            # اگر QR تولید نشد، حداقل کپشن متن را جدا بفرستیم (یک‌بار)
-            if idx == 1:
-                await m.answer(caption, parse_mode="HTML")
-
-    if photos:
-        # اگر به هر دلیلی فقط یک آیتم معتبر شد، باز هم باید تک‌عکس بفرستیم نه مدیاگروپ
-        if len(photos) == 1:
-            await m.answer_photo(
-                photo=photos[0].media,
-                caption=caption,
-                parse_mode="HTML"
-            )
-        else:
-            await m.answer_media_group(photos)
+    try:
+        qr_bytes = make_qr_png_bytes(qr_target)
+        await m.answer_photo(
+            photo=BufferedInputFile(qr_bytes, filename="trial_qr.png"),
+            caption=caption,
+            parse_mode="HTML"
+        )
+    except Exception:
+        await m.answer(caption, parse_mode="HTML")
 
 
 @router.message(F.text == "🧪 اکانت تست")
@@ -158,43 +88,76 @@ async def trial_handler(m: types.Message):
     )
 
     now = datetime.utcnow()
-    dev_count = int(TRIAL_CONF["devices"])
 
-    # اگر قبلاً تست فعال دارد و تمام نشده، همان را نشان بده (و در صورت نیاز لینک‌ها را کامل کن)
+    # 1. بررسی اینکه آیا قبلاً تست گرفته؟ (فعال یا منقضی مهم نیست، هر نفر یک بار)
+    # اگر می‌خواهید بعد از انقضا دوباره بتواند بگیرد، شرط status را بردارید
     existed = await subscriptions_col.find_one({
         "user_id": user["_id"],
-        "source_plan": "trial",
-        "status": "active",
-        "end_at": {"$gt": now},
+        "source_plan": "trial"
     })
+
     if existed:
-        links, _ = await _ensure_trial_links(m.from_user.id, existed["_id"], dev_count)
-        await _send_links_with_qr(m, links, existed["end_at"])
+        # اگر تست قبلاً گرفته، لینک‌هاش رو نشون بده (یا بگو تموم شده)
+        if existed.get("end_at") > now and existed.get("status") == "active":
+            # هنوز فعاله، دوباره براش بفرست
+            uuid_str = existed.get("uuid")
+            # بازسازی لینک‌ها
+            sub_link = f"{settings.PANEL_URL.rstrip('/')}/sub/{uuid_str}"
+            vless_link = xray._generate_vless_link(uuid_str, existed.get("email", "trial"))
+
+            await m.answer(rtl("شما قبلاً اکانت تست فعال دارید. اطلاعات آن:"))
+            await _send_links_with_qr(m, [vless_link], sub_link, existed["end_at"])
+        else:
+            await m.answer(rtl("❌ شما قبلاً از اکانت تست استفاده کرده‌اید. لطفاً اشتراک تهیه کنید."))
         return
 
-    # ساخت تِست جدید
-    end_at = now + timedelta(hours=TRIAL_CONF["hours"])
-    links: list[str] = []
-    accounts: list[dict] = []
-    for i in range(dev_count):
-        email = f"trial-{m.from_user.id}-{i + 1}@bot"
-        uuid_str, vless_link = add_client(email)
-        links.append(vless_link)
-        accounts.append({"email": email, "uuid": uuid_str})
+    # 2. ساخت تست جدید
+    wait_msg = await m.answer(rtl("⏳ در حال ساخت اکانت تست..."))
 
+    email = f"trial-{m.from_user.id}-{int(datetime.now().timestamp())}"
+    end_at = now + timedelta(hours=TRIAL_CONF["hours"])
+
+    # محاسبه روز (برای تابع add_client که روز میگیره)
+    # چون تابع روز میگیره و ما ساعت میخوایم، باید تبدیل کنیم یا تابع رو تغییر بدیم
+    # فعلا 1 روز میزنیم ولی Expire Time رو دستی ست میکنیم
+    days = 1
+
+    # درخواست به پنل
+    result = await xray.add_client(
+        email=email,
+        limit_ip=TRIAL_CONF["limit_ip"],
+        total_gb=TRIAL_CONF["quota_mb"] / 1024,  # تبدیل مگ به گیگ (چون تابع گیگ میگیره)
+        expire_days=days
+    )
+
+    if not result:
+        await wait_msg.edit_text(rtl("❌ خطا در ارتباط با سرور. لطفاً بعداً تلاش کنید."))
+        return
+
+    uuid_str = result["uuid"]
+    vless_link = result["link"]
+
+    # لینک اشتراک
+    sub_link = f"{settings.PANEL_URL.rstrip('/')}/sub/{uuid_str}"
+
+    # ذخیره در دیتابیس
     sub_doc = {
         "user_id": user["_id"],
         "order_id": None,
         "source_plan": "trial",
         "quota_mb": TRIAL_CONF["quota_mb"],
         "used_mb": 0,
-        "devices": dev_count,
+        "devices": TRIAL_CONF["limit_ip"],
         "start_at": now,
         "end_at": end_at,
         "status": "active",
-        "config_ref": links,  # لیست لینک‌ها
-        "xray": accounts,  # لیست ایمیل/UUID
+
+        # فیلدهای جدید
+        "uuid": uuid_str,
+        "email": email,
+        "config_ref": [vless_link]
     }
     await subscriptions_col.insert_one(sub_doc)
 
-    await _send_links_with_qr(m, links, end_at)
+    await wait_msg.delete()
+    await _send_links_with_qr(m, [vless_link], sub_link, end_at)

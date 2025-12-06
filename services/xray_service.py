@@ -1,315 +1,188 @@
-# services/xray_service.py
 import json
-import os
-import re
-import shutil
-import subprocess
-import tempfile
 import uuid
-from typing import Tuple, Optional
+import time
+import logging
+import requests  # استفاده از کتابخانه مطمئن requests
+from urllib.parse import urlencode
 
-# ===== Settings (env) =====
-XRAY_CONFIG_PATH = os.getenv("XRAY_CONFIG_PATH", "/usr/local/etc/xray/config.json")
-XRAY_SERVICE_NAME = os.getenv("XRAY_SERVICE_NAME", "xray")
+from config import settings
 
-# لینک‌سازی VLESS/WS
-XRAY_DOMAIN = os.getenv("XRAY_DOMAIN", "127.0.0.1")
-XRAY_WS_PATH = os.getenv("XRAY_WS_PATH", "/ws8081")
-XRAY_PORT = int(os.getenv("XRAY_PORT", "8081"))
-XRAY_SECURITY = os.getenv("XRAY_SECURITY", "none")  # none | tls | reality
-
-# Runtime API
-XRAY_BIN = os.getenv("XRAY_BIN", "/usr/local/bin/xray")
-XRAY_API_ADDR = os.getenv("XRAY_API_ADDR", "127.0.0.1:10085")
-INBOUND_TAG = os.getenv("XRAY_INBOUND_TAG", "vless-ws")  # باید در config به inbound 8081 داده شده باشد (tag)
+logger = logging.getLogger(__name__)
 
 
-# ---------- File IO helpers ----------
-def _test_config(path: str) -> None:
-    """xray -test -config <path>؛ خطا بده اگر نامعتبر بود."""
-    p = subprocess.run(
-        [XRAY_BIN, "-test", "-config", path],
-        capture_output=True, text=True
-    )
-    if p.returncode != 0:
-        msg = (p.stderr or p.stdout or "").strip()
-        raise RuntimeError(f"xray -test failed: {msg}")
+class XrayService:
+    def __init__(self):
+        # آدرس پایه (بدون اسلش آخر)
+        self.base_url = settings.PANEL_URL.rstrip("/")
+        self.username = settings.PANEL_USERNAME
+        self.password = settings.PANEL_PASSWORD
+        self.inbound_id = settings.INBOUND_ID
 
+        # استفاده از Session برای مدیریت خودکار کوکی‌ها
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36",
+            "X-Requested-With": "XMLHttpRequest",
+            "Accept": "application/json, text/plain, */*"
+        })
 
-def _apply_config_safely(new_cfg: dict) -> None:
-    """
-    کانفیگ جدید را در فایل موقت می‌نویسد، تست می‌کند،
-    اگر OK بود اتمیک جایگزین می‌کند و سپس reload می‌زند.
-    اگر هر مرحله‌ای خطا داشت، کانفیگ قبلی برمی‌گردد.
-    """
-    cfg_dir = os.path.dirname(XRAY_CONFIG_PATH) or "."
-    backup = XRAY_CONFIG_PATH + ".bak"
-
-    # 1) نوشتن موقت
-    fd, tmp = tempfile.mkstemp(dir=cfg_dir, prefix=".xraycfg_", suffix=".json")
-    os.close(fd)
-    try:
-        with open(tmp, "w") as f:
-            json.dump(new_cfg, f, ensure_ascii=False, indent=2)
-
-        # 2) تست
-        _test_config(tmp)
-
-        # 3) بکاپ و جایگزینی اتمیک
-        if os.path.exists(XRAY_CONFIG_PATH):
-            try:
-                shutil.copy2(XRAY_CONFIG_PATH, backup)
-            except Exception:
-                pass
-        os.replace(tmp, XRAY_CONFIG_PATH)
-
-        # 4) ری‌لود (HUP)؛ اگر نشد، ری‌استارت
+    def _login(self) -> bool:
+        """ورود به پنل (سینکرون)"""
+        url = f"{self.base_url}/login"
+        payload = {"username": self.username, "password": self.password}
         try:
-            subprocess.run(["sudo", "systemctl", "reload", XRAY_SERVICE_NAME],
-                           check=True, capture_output=True, text=True)
-        except subprocess.CalledProcessError:
-            subprocess.run(["sudo", "systemctl", "restart", XRAY_SERVICE_NAME],
-                           check=True, capture_output=True, text=True)
+            resp = self.session.post(url, data=payload, timeout=10)
+            if resp.status_code == 200 and resp.json().get('success'):
+                # logger.info("✅ Login successful")
+                return True
+            else:
+                logger.error(f"❌ Login failed: {resp.text}")
+        except Exception as e:
+            logger.error(f"⚠️ Connection error during login: {e}")
+        return False
 
-    except Exception as e:
-        # اگر هرکدام شکست خورد و فایل موقت هست پاک کن
+    def _request(self, method: str, endpoint: str, data: dict = None):
+        """ارسال درخواست با مدیریت لاگین"""
+        # نکته حیاتی: اضافه کردن /panel به آدرس‌ها طبق تست موفق
+        url = f"{self.base_url}/panel{endpoint}"
+
+        # تلاش اول
         try:
-            if os.path.exists(tmp):
-                os.remove(tmp)
-        finally:
-            raise
+            if method == "POST":
+                resp = self.session.post(url, data=data)
+            else:
+                resp = self.session.get(url)
 
+            # اگر کوکی منقضی شده بود (معمولا رداریکت میکنه به لاگین یا 401 میده)
+            if "login" in resp.url or resp.status_code in [401, 403]:
+                logger.warning("Session expired, re-login...")
+                if self._login():
+                    # تلاش مجدد
+                    if method == "POST":
+                        resp = self.session.post(url, data=data)
+                    else:
+                        resp = self.session.get(url)
 
-def _assert_paths():
-    if not os.path.exists(XRAY_CONFIG_PATH):
-        raise FileNotFoundError(f"XRAY_CONFIG_PATH not found: {XRAY_CONFIG_PATH}")
-    if not os.access(XRAY_CONFIG_PATH, os.R_OK):
-        raise PermissionError(f"No read permission for {XRAY_CONFIG_PATH}")
-    cfg_dir = os.path.dirname(XRAY_CONFIG_PATH) or "."
-    if not os.access(cfg_dir, os.W_OK):
-        # ممکنه با sudo systemd مدیریت شه؛ اینجا فقط هشدار ذهنی
-        pass
+            if resp.status_code == 200:
+                try:
+                    return resp.json()
+                except:
+                    logger.error(f"Invalid JSON response from {url}")
+                    return None
+            else:
+                logger.error(f"API Error {resp.status_code} on {url}: {resp.text}")
+                return None
 
+        except Exception as e:
+            # اگر کلا لاگین نبودیم، یه بار لاگین کن و دوباره تلاش کن
+            if self._login():
+                try:
+                    if method == "POST":
+                        resp = self.session.post(url, data=data)
+                    else:
+                        resp = self.session.get(url)
+                    return resp.json() if resp.status_code == 200 else None
+                except:
+                    pass
+            logger.error(f"Request Error ({endpoint}): {e}")
+            return None
 
-def _load_config() -> dict:
-    _assert_paths()
-    with open(XRAY_CONFIG_PATH, "r") as f:
-        return json.load(f)
+    # نکته: توابع رو async تعریف می‌کنیم تا ساختار بقیه ربات بهم نریزه
+    # ولی درونش از requests معمولی استفاده می‌کنیم (چون خیلی سریع انجام میشه مشکلی نیست)
+    async def add_client(self, email: str, limit_ip: int = 1, total_gb: int = 0, expire_days: int = 30) -> dict | None:
+        """ساخت کاربر جدید"""
+        client_uuid = str(uuid.uuid4())
 
+        # تولید SubId رندوم
+        import random, string
+        sub_id = ''.join(random.choices(string.ascii_lowercase + string.digits, k=16))
 
-def _save_config(cfg: dict):
-    """Atomic write + backup + chmod 0644 تا systemd بتونه بخونه."""
-    cfg_dir = os.path.dirname(XRAY_CONFIG_PATH) or "."
-    backup = XRAY_CONFIG_PATH + ".bak"
-    if os.path.exists(XRAY_CONFIG_PATH):
-        try:
-            shutil.copy2(XRAY_CONFIG_PATH, backup)
-        except Exception:
-            pass
+        total_bytes = int(total_gb) * 1024 * 1024 * 1024
+        expiry_time = int((time.time() + (expire_days * 86400)) * 1000) if expire_days > 0 else 0
 
-    fd, tmp = tempfile.mkstemp(dir=cfg_dir, prefix=".xraycfg_", suffix=".json")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, XRAY_CONFIG_PATH)
-        try:
-            os.chmod(XRAY_CONFIG_PATH, 0o644)
-        except Exception:
-            pass
-    finally:
-        if os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except Exception:
-                pass
-
-
-# ---------- systemd helpers ----------
-def _restart_xray():
-    try:
-        subprocess.run(
-            ["sudo", "systemctl", "restart", XRAY_SERVICE_NAME],
-            check=True, capture_output=True, text=True,
-        )
-    except subprocess.CalledProcessError as e:
-        msg = e.stderr.strip() or e.stdout.strip() or str(e)
-        raise RuntimeError(f"Failed to restart {XRAY_SERVICE_NAME}: {msg}")
-
-
-def _reload_xray():
-    """ترجیح با reload برای حداقل قطعی؛ اگر نبود → restart."""
-    try:
-        subprocess.run(
-            ["sudo", "systemctl", "reload", XRAY_SERVICE_NAME],
-            check=True, capture_output=True, text=True,
-        )
-    except subprocess.CalledProcessError as e:
-        try:
-            subprocess.run(
-                ["sudo", "systemctl", "restart", XRAY_SERVICE_NAME],
-                check=True, capture_output=True, text=True,
-            )
-        except subprocess.CalledProcessError as e2:
-            msg1 = e.stderr.strip() or e.stdout.strip() or str(e)
-            msg2 = e2.stderr.strip() or e2.stdout.strip() or str(e2)
-            raise RuntimeError(
-                f"Failed to reload {XRAY_SERVICE_NAME}: {msg1}; restart fallback failed: {msg2}"
-            )
-
-
-# ---------- Inbound helpers (file mode) ----------
-def _safe_tag(s: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]+", "_", s)
-
-
-def _find_vless_ws_inbound(cfg: dict) -> Optional[dict]:
-    for ib in cfg.get("inbounds", []):
-        if ib.get("tag") == INBOUND_TAG:
-            return ib
-    for ib in cfg.get("inbounds", []):
-        if ib.get("protocol") == "vless" and ib.get("streamSettings", {}).get("network") == "ws":
-            return ib
-    return None
-
-
-def _ensure_vless_ws_inbound(cfg: dict):
-    ib = _find_vless_ws_inbound(cfg)
-    if ib:
-        return
-    cfg.setdefault("inbounds", []).append({
-        "tag": INBOUND_TAG,
-        "port": XRAY_PORT,
-        "protocol": "vless",
-        "settings": {"clients": [], "decryption": "none"},
-        "streamSettings": {
-            "network": "ws",
-            "security": XRAY_SECURITY,
-            "wsSettings": {"path": XRAY_WS_PATH}
+        # تنظیمات کلاینت (JSON String)
+        client_settings_dict = {
+            "clients": [
+                {
+                    "id": client_uuid,
+                    "email": email,
+                    "limitIp": limit_ip,
+                    "totalGB": total_bytes,
+                    "expiryTime": expiry_time,
+                    "enable": True,
+                    "tgId": "",
+                    "subId": sub_id,
+                    "flow": "",
+                    "reset": 0
+                }
+            ]
         }
-    })
 
+        payload = {
+            "id": self.inbound_id,
+            "settings": json.dumps(client_settings_dict)
+        }
 
-def _build_vless_ws_link(uuid_str: str, email: str) -> str:
-    # sanitize host: strip spaces/comments/rtl marks
-    raw_host = str(XRAY_DOMAIN or "").strip()
-    raw_host = re.split(r"[#\s]", raw_host, 1)[0].strip()
-    raw_host = raw_host.replace("\u200f", "").replace("\u200e", "").replace("\u2066", "").replace("\u2069", "")
-    host = raw_host or "127.0.0.1"
+        # ارسال به /api/inbounds/addClient (متد _request خودش /panel رو اضافه میکنه)
+        resp = self._request("POST", "/api/inbounds/addClient", data=payload)
 
-    path = XRAY_WS_PATH
-    port = XRAY_PORT
-    # tag/fragment: only safe URL chars
-    from urllib.parse import quote
-    frag = quote(re.sub(r"[^A-Za-z0-9._@+-]+", "_", email), safe="")
-    params = f"type=ws&path={path}&encryption=none&security={XRAY_SECURITY}"
-    return f"vless://{uuid_str}@{host}:{port}?{params}#{frag}"
+        if resp and resp.get("success"):
+            logger.info(f"User {email} created successfully.")
+            return {
+                "uuid": client_uuid,
+                "email": email,
+                "link": self._generate_vless_link(client_uuid, email)
+            }
+        else:
+            return None
 
+    async def remove_client(self, email: str) -> bool:
+        """حذف کاربر"""
+        client_info = await self.get_client_stats(email)
+        if not client_info or not client_info.get("uuid"):
+            return False
 
-# ---------- Runtime API helpers ----------
-def _xray_api(args: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [XRAY_BIN, "api", *args],
-        check=True, capture_output=True, text=True
-    )
+        payload = {
+            "id": self.inbound_id,
+            "clientUuid": client_info["uuid"]
+        }
 
+        resp = self._request("POST", "/api/inbounds/delClient", data=payload)
+        return resp and resp.get("success")
 
-def _add_user_runtime(email: str, uuid_str: Optional[str] = None) -> str:
-    """addUser روی هندلر runtime (بی‌قطعی). خروجی: لینک VLESS."""
-    if not uuid_str:
-        uuid_str = str(uuid.uuid4())
-    user_obj = {"id": uuid_str, "email": email}
-    _xray_api([
-        "handler", "addUser",
-        f"--server={XRAY_API_ADDR}",
-        f"--tag={INBOUND_TAG}",
-        f"--user={json.dumps(user_obj)}",
-    ])
-    return _build_vless_ws_link(uuid_str, email)
+    async def get_client_stats(self, email: str) -> dict | None:
+        """دریافت آمار کاربر"""
+        resp = self._request("GET", f"/api/inbounds/get/{self.inbound_id}")
 
+        if resp and resp.get("success"):
+            obj = resp.get("obj", {})
+            settings_json = json.loads(obj.get("settings", "{}"))
+            clients = settings_json.get("clients", [])
+            client_stats = obj.get("clientStats", [])
 
-def _remove_user_runtime(email: str) -> bool:
-    try:
-        _xray_api([
-            "handler", "removeUser",
-            f"--server={XRAY_API_ADDR}",
-            f"--tag={INBOUND_TAG}",
-            f"--email={email}",
-        ])
-        return True
-    except Exception:
-        return False
+            for client in clients:
+                if client.get("email") == email:
+                    stat = next((s for s in client_stats if s.get("email") == email), {})
+                    return {
+                        "email": email,
+                        "uuid": client.get("id"),
+                        "total": client.get("totalGB", 0),
+                        "up": stat.get("up", 0),
+                        "down": stat.get("down", 0),
+                        "expiry": client.get("expiryTime", 0),
+                        "enable": client.get("enable", True)
+                    }
+        return None
 
-
-# ---------- Public API ----------
-def add_client(email: str) -> Tuple[str, str]:
-    cfg = _load_config()
-    _ensure_vless_ws_inbound(cfg)
-
-    ib = _find_vless_ws_inbound(cfg)
-    if not ib:
-        raise RuntimeError("VLESS/WS inbound not found or failed to create.")
-
-    clients = ib.setdefault("settings", {}).setdefault("clients", [])
-
-    # اگر ایمیل وجود دارد، کانفیگ را دست نمی‌زنیم (بدون ری‌لود)
-    for c in clients:
-        if c.get("email") == email:
-            link = _build_vless_ws_link(c["id"], email)
-            return c["id"], link
-
-    # افزودن کلاینت جدید
-    uid = str(uuid.uuid4())
-    clients.append({"id": uid, "email": email})
-
-    # به‌صورت امن اعمال کن (تست + رول‌بک)
-    _apply_config_safely(cfg)
-
-    return uid, _build_vless_ws_link(uid, email)
-
-
-def remove_client(email: str) -> bool:
-    """
-    حذف کاربر:
-    1) سعی با Runtime API؛
-    2) اگر نشد → از فایل حذف + reload.
-    """
-    if _remove_user_runtime(email):
-        return True
-
-    cfg = _load_config()
-    ib = _find_vless_ws_inbound(cfg)
-    if not ib:
-        return False
-
-    clients = ib.setdefault("settings", {}).setdefault("clients", [])
-    before = len(clients)
-    clients[:] = [c for c in clients if c.get("email") != email]
-    changed = len(clients) != before
-    if changed:
-        _save_config(cfg)
-        _reload_xray()
-    return changed
-
-
-# ---------- Stats (traffic per user) ----------
-def _xray_api_stats_query(name: str) -> int:
-    """
-    xray api stats query --server=127.0.0.1:10085 --name 'user>>>EMAIL>>>traffic>>>uplink'
-    خروجی برخی بیلدها «value: N» است؛ تبدیل به int می‌کنیم.
-    """
-    try:
-        cmd = [XRAY_BIN, "api", "stats", "query", f"--server={XRAY_API_ADDR}", "--name", name]
-        p = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        out = (p.stdout or "").strip()
-        if out.startswith("value:"):
-            out = out.split(":", 1)[1].strip()
-        return int(out or "0")
-    except Exception:
-        return 0
-
-
-def get_user_traffic_bytes(email: str) -> tuple[int, int, int]:
-    """بایت‌های (uplink, downlink, total) برای یک ایمیل کاربر."""
-    up = _xray_api_stats_query(f"user>>>{email}>>>traffic>>>uplink")
-    dn = _xray_api_stats_query(f"user>>>{email}>>>traffic>>>downlink")
-    return up, dn, up + dn
+    def _generate_vless_link(self, uuid_str: str, name: str) -> str:
+        """ساخت لینک VLESS"""
+        params = {
+            "type": "ws",
+            "security": settings.XRAY_SECURITY,
+            "path": settings.XRAY_WS_PATH,
+            "host": settings.XRAY_DOMAIN,
+            "fp": "chrome",
+            "alpn": "http/1.1"
+        }
+        query = urlencode(params)
+        return f"vless://{uuid_str}@{settings.XRAY_DOMAIN}:{settings.XRAY_PORT}?{query}#{name}"

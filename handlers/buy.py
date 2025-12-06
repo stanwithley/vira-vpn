@@ -359,22 +359,20 @@ async def receive_c2c_proof(m: types.Message, state: FSMContext):
 
 # ===== ادمین: تایید/رد =====
 
-def is_admin(user_id: int) -> bool:
-    # Owner هم ادمین محسوب میشه
-    try:
-        from config import settings
-        if int(user_id) == int(getattr(settings, "OWNER_UID")):
-            return True
-    except Exception:
-        pass
-    # بقیه ادمین‌ها از DB
-    import asyncio
-    return asyncio.get_event_loop().run_until_complete(is_admin_db(user_id))
+async def is_admin(user_id: int) -> bool:
+    # 1. Config
+    from config import settings
+    if hasattr(settings, "ADMIN_CHAT_IDS") and int(user_id) in settings.ADMIN_CHAT_IDS:
+        return True
+
+    # 2. Database
+    return await is_admin_db(user_id)
+
 
 
 @router.callback_query(F.data.startswith("approve_payment:"))
 async def on_approve_payment(cq: types.CallbackQuery):
-    if not is_admin(cq.from_user.id):
+    if not await is_admin(cq.from_user.id):
         return await cq.answer("اجازه دسترسی ندارید.", show_alert=True)
 
     payment_id = cq.data.split(":", 1)[1]

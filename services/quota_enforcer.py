@@ -1,19 +1,25 @@
 # services/quota_enforcer.py
 import asyncio
+import logging
 from datetime import datetime, timezone
 
 from aiogram import Bot
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from db.mongo import subscriptions_col, users_col
-from services.xray_service import get_user_traffic_bytes, remove_client
+# ایمپورت کلاس جدید
+from services.xray_service import XrayService
+
+logger = logging.getLogger(__name__)
+
+# ساخت نمونه از سرویس پنل
+xray = XrayService()
 
 BYTES_PER_MB = 1024 * 1024
 
 
 def _collect_emails(sub: dict) -> list[str]:
-    """
-    از فیلد sub["xray"] (می‌تونه list یا dict باشه) ایمیل‌ها را استخراج می‌کند.
-    """
+    """استخراج لیست ایمیل‌ها از دیتابیس"""
     x = sub.get("xray") or []
     if isinstance(x, dict):
         return [x.get("email")] if x.get("email") else []
@@ -32,9 +38,7 @@ def _fa_num(s: str) -> str:
 
 
 async def _notify_quota_exhausted(bot: Bot, sub: dict, used_mb: int):
-    """
-    پیام اتمام حجم (فقط یک بار).
-    """
+    """ارسال پیام اتمام حجم"""
     user = await users_col.find_one({"_id": sub["user_id"]})
     if not user or user.get("tg_id") is None:
         return
@@ -44,103 +48,96 @@ async def _notify_quota_exhausted(bot: Bot, sub: dict, used_mb: int):
     devices = int(sub.get("devices") or 1)
 
     txt = _rtl(
-        "⛔ حجم اشتراک شما به پایان رسید.\n\n"
-        f"• ظرفیت: {_fa_num(quota_mb)} مگ\n"
-        f"• مصرف‌شده: {_fa_num(used_mb)} مگ\n"
-        f"• دستگاه: {_fa_num(devices)}\n"
+        "⛔ <b>حجم اشتراک شما به پایان رسید.</b>\n\n"
+        f"• ظرفیت کل: {_fa_num(str(quota_mb))} مگ\n"
+        f"• مصرف شده: {_fa_num(str(used_mb))} مگ\n"
+        f"• تعداد کاربر: {_fa_num(str(devices))}\n"
         "—\n"
-        "برای ادامه استفاده، اشتراک را تمدید یا پلن بزرگ‌تر تهیه کنید."
+        "برای اتصال مجدد، لطفاً اشتراک خود را تمدید کنید."
     )
 
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
-
     kb = InlineKeyboardBuilder()
-    kb.button(text=_rtl("🔁 تمدید/خرید"), callback_data="renew:plans")
-    kb.button(text=_rtl("🛟 پشتیبانی"), callback_data="support_open")
+    kb.button(text=_rtl("🔁 تمدید سرویس"), callback_data="renew:plans")
+    kb.button(text=_rtl("🛟 پشتیبانی"), url="https://t.me/viravpnsupport")  # لینک پشتیبانی ثابت
     kb.adjust(1)
 
     try:
-        await bot.send_message(tg_id, txt, reply_markup=kb.as_markup())
+        await bot.send_message(tg_id, txt, reply_markup=kb.as_markup(), parse_mode="HTML")
     except Exception:
         pass
 
 
 async def _notify_expired(bot: Bot, sub: dict):
-    """
-    پیام پایان تاریخ اشتراک.
-    """
+    """ارسال پیام انقضای زمان"""
     user = await users_col.find_one({"_id": sub["user_id"]})
     if not user or user.get("tg_id") is None:
         return
     tg_id = int(user["tg_id"])
 
     txt = _rtl(
-        "⏳ مدت اشتراک شما به پایان رسید و دسترسی غیرفعال شد.\n"
-        "برای ادامه استفاده، لطفاً تمدید کنید."
+        "⏳ <b>مهلت اشتراک شما به پایان رسید.</b>\n"
+        "دسترسی سرویس قطع شد. برای ادامه استفاده لطفاً تمدید کنید."
     )
 
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
-
     kb = InlineKeyboardBuilder()
-    kb.button(text=_rtl("🔁 تمدید/خرید"), callback_data="renew:plans")
-    kb.button(text=_rtl("🛟 پشتیبانی"), callback_data="support_open")
+    kb.button(text=_rtl("🔁 تمدید سرویس"), callback_data="renew:plans")
     kb.adjust(1)
 
     try:
-        await bot.send_message(tg_id, txt, reply_markup=kb.as_markup())
+        await bot.send_message(tg_id, txt, reply_markup=kb.as_markup(), parse_mode="HTML")
     except Exception:
         pass
 
 
-async def _current_total_bytes(email: str) -> int:
-    """
-    گرفتن ترافیک کل (uplink+downlink) از Xray (در ترد جدا).
-    """
-    _, __, tot = await asyncio.to_thread(get_user_traffic_bytes, email)
-    return int(tot or 0)
+async def _get_current_total_bytes(email: str) -> int:
+    """دریافت مجموع مصرف (آپلود + دانلود) از پنل جدید"""
+    stats = await xray.get_client_stats(email)
+    if stats:
+        return int(stats.get("up", 0)) + int(stats.get("down", 0))
+    return 0
 
 
 async def _suspend_and_remove_all(emails: list[str]):
-    """
-    حذف دسترسی همه ایمیل‌ها از Xray در ترد جدا.
-    """
-    tasks = [asyncio.to_thread(remove_client, em) for em in emails]
-    # در صورت بروز خطا، نمی‌خوایم کل لوپ بترکه
-    try:
-        await asyncio.gather(*tasks, return_exceptions=True)
-    except Exception:
-        pass
+    """حذف یوزرها از پنل (Async)"""
+    for em in emails:
+        try:
+            await xray.remove_client(em)
+        except Exception as e:
+            logger.error(f"Error removing client {em}: {e}")
 
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-async def quota_loop(bot: Bot, interval_sec: int = 120):
+async def quota_loop(bot: Bot, interval_sec: int = 180):  # هر 3 دقیقه چک میکند
     """
-    هر interval_sec ثانیه:
-      - اگر end_at گذشته → تعلیق + حذف کاربر از Xray + نوتیف انقضا
-      - در غیر این صورت مصرف را با اتکا به last_bytes/consumed_bytes بروزرسانی می‌کند.
-      - اگر used_mb >= quota_mb → تعلیق + حذف از Xray + نوتیف اتمام حجم (یک‌باره)
+    حلقه اصلی بررسی مصرف و انقضا
     """
+    logger.info("⚖️ Quota enforcer loop started.")
     while True:
         try:
+            # فقط اشتراک‌های فعال را چک کن
             cursor = subscriptions_col.find({"status": "active"})
+
             async for sub in cursor:
-                # ---------- چک تاریخ انقضا ----------
+                # 1. چک کردن تاریخ انقضا
                 end_at = sub.get("end_at")
                 if end_at:
-                    # end_at ممکن است naive باشد؛ با now UTC مقایسه‌ی ساده
                     try:
-                        is_expired = _now_utc() >= (end_at if end_at.tzinfo else end_at.replace(tzinfo=timezone.utc))
+                        # هندل کردن منطقه زمانی
+                        now = _now_utc()
+                        expiry = end_at if end_at.tzinfo else end_at.replace(tzinfo=timezone.utc)
+                        is_expired = now >= expiry
                     except Exception:
-                        is_expired = _now_utc() >= _now_utc()  # fallback بی‌معنا؛ فقط نذاره بترکه
+                        is_expired = False
+
                     if is_expired:
                         emails = _collect_emails(sub)
                         if emails:
                             await _suspend_and_remove_all(emails)
 
-                        # اگر قبلاً ساسپند نشده بود، به user خبر بده
+                        # آپدیت وضعیت به Suspended
                         already_notified = bool(sub.get("expired_notified"))
                         await subscriptions_col.update_one(
                             {"_id": sub["_id"]},
@@ -148,60 +145,51 @@ async def quota_loop(bot: Bot, interval_sec: int = 120):
                         )
                         if not already_notified:
                             await _notify_expired(bot, sub)
-                        # وقتی منقضی شد، ادامه‌ی محاسبه‌ی مصرف لازم نیست
                         continue
 
-                # ---------- محاسبه‌ی مصرف با تحمل ری‌استارت ----------
+                # 2. چک کردن حجم مصرفی
                 quota_mb = int(sub.get("quota_mb") or 0)
                 if quota_mb <= 0:
-                    # اگر سهمیه تعریف نشده/صفره، فقط used_mb را صفر نگه دار
-                    await subscriptions_col.update_one(
-                        {"_id": sub["_id"]},
-                        {"$set": {"used_mb": 0}}
-                    )
+                    # اگر نامحدود حجمی است، کاری نداریم
                     continue
 
                 emails = _collect_emails(sub)
                 if not emails:
-                    # ایمیلی ثبت نشده؛ نمی‌شه مصرف را حساب کرد
                     continue
 
-                # حالت قبلی را از DB بخوان
+                # منطق محاسبه افزایشی (Delta)
+                # این روش عالیه چون حتی اگه پنل ریست بشه، مصرف کاربر صفر نمیشه
                 last_bytes: dict = sub.get("last_bytes") or {}
                 consumed_bytes: int = int(sub.get("consumed_bytes") or (int(sub.get("used_mb") or 0) * BYTES_PER_MB))
 
-                # مجموع افزایشی مصرف از آخرین اندازه‌گیری
-                new_last_bytes = dict(last_bytes)  # کپی برای آپدیت
+                new_last_bytes = dict(last_bytes)
                 increments_sum = 0
 
-                # به صورت موازی از Xray بگیر
-                totals = await asyncio.gather(*[_current_total_bytes(em) for em in emails], return_exceptions=True)
-
-                for em, cur in zip(emails, totals):
-                    if isinstance(cur, Exception):
-                        # اگر نتونستیم بگیریم، این ایمیل رو نادیده بگیر
-                        continue
-                    cur = int(cur or 0)
+                # دریافت مصرف همه یوزرهای این اشتراک
+                for em in emails:
+                    cur = await _get_current_total_bytes(em)
                     prev = int(last_bytes.get(em) or 0)
 
                     if prev == 0:
-                        # اولین بار است یا baseline نداریم → baseline را می‌گذاریم، افزایشی 0
+                        # اولین بار است که داریم چک میکنیم
                         new_last_bytes[em] = cur
                         continue
 
                     if cur >= prev:
+                        # حالت عادی: مصرف زیاد شده
                         inc = cur - prev
                         increments_sum += inc
                         new_last_bytes[em] = cur
                     else:
-                        # ری‌استارت Xray یا ریست شدن شمارنده → baseline جدید
+                        # حالت ریست شدن پنل: پنل صفر شده ولی ما ادامه میدیم
+                        # کل مقدار فعلی رو به عنوان مصرف جدید حساب میکنیم
+                        increments_sum += cur
                         new_last_bytes[em] = cur
-                        # افزایشی 0 تا دو بار حساب نشه
 
                 consumed_bytes += increments_sum
                 used_mb = consumed_bytes // BYTES_PER_MB
 
-                # ---------- ذخیره‌ی وضعیت ----------
+                # ذخیره در دیتابیس
                 await subscriptions_col.update_one(
                     {"_id": sub["_id"]},
                     {"$set": {
@@ -211,7 +199,7 @@ async def quota_loop(bot: Bot, interval_sec: int = 120):
                     }}
                 )
 
-                # ---------- اعمال محدودیت سهمیه ----------
+                # 3. اعمال محدودیت حجم
                 if used_mb >= quota_mb:
                     emails = _collect_emails(sub)
                     if emails:
@@ -225,8 +213,8 @@ async def quota_loop(bot: Bot, interval_sec: int = 120):
                     if not already_notified:
                         await _notify_quota_exhausted(bot, sub, used_mb)
 
-        except Exception:
-            # اجازه نمی‌دهیم لوپ از کار بیفتد
-            pass
+        except Exception as e:
+            logger.error(f"Error in quota_loop: {e}")
+            # اجازه نمیدیم لوپ کرش کنه
 
         await asyncio.sleep(interval_sec)
