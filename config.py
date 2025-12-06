@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     # === تنظیمات اتصال به پنل (اصلاح شده با مسیر امن) ===
     # آدرس لوکال + پورت + مسیر امنی که نخواستی پاک کنی
     # این خط را دقیقاً جایگزین کنید (کپی/پیست کنید تا تایپ اشتباه نشود)
-    PANEL_URL: str = "http://193.180.211.230:54321/cWrhkR40LuKobweVYO"
+    PANEL_URL: str = "http://127.0.0.1:54321/cWrhkR40LuKobweVYO"
 
     PANEL_USERNAME: str = "hatef"  # یوزرنیم ورود به پنل
     PANEL_PASSWORD: str = "hatef1381"  # رمز ورود به پنل (اگه عوض کردی اینجا هم عوض کن)
